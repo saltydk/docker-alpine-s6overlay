@@ -14,11 +14,23 @@ before_script:
   only:
     - master
 
+build-master-3.9:
+  extends: .build
+  stage: build
+  variables:
+    TAG: "3.9"
+
 build-master-3.10:
   extends: .build
   stage: build
   variables:
     TAG: "3.10"
+
+build-master-3.11:
+  extends: .build
+  stage: build
+  variables:
+    TAG: "3.11"
 
 build-master-edge:
   extends: .build
