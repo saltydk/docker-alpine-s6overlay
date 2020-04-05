@@ -17,8 +17,6 @@ variables:
     - name: docker:stable-dind
       command: ["--experimental"]
   variables:
-    PLATFORM: ""
-    OVERLAY_ARCH: ""
     BUILD_TAG: ""
     DOCKER_TAG: ""
   tags:
@@ -27,127 +25,46 @@ variables:
     - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" ${CI_REGISTRY}
     - docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
   script:
-    - docker build --pull --platform "${PLATFORM}" --build-arg="TAG=${BUILD_TAG}" --build-arg="OVERLAY_ARCH=${OVERLAY_ARCH}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}" .
+    - docker build --pull --platform "linux/amd64" --build-arg="TAG=${BUILD_TAG}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-amd64" .
+    - docker build --pull --platform "linux/arm64" --build-arg="TAG=${BUILD_TAG}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-arm64" .
+    - docker build --pull --platform "linux/arm/v7" --build-arg="TAG=${BUILD_TAG}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-armv7" .
+    - docker manifest create "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-amd64" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-arm64" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-armv7"
     - docker push "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}"
   only:
     - master
 
-.build_amd64:
-  extends: .build
-  variables:
-    PLATFORM: "linux/amd64"
-    OVERLAY_ARCH: "amd64"
-
-.build_arm64:
-  extends: .build
-  variables:
-    PLATFORM: "linux/arm64"
-    OVERLAY_ARCH: "aarch64"
-
-.build_armv7:
-  extends: .build
-  variables:
-    PLATFORM: "linux/arm/v7"
-    OVERLAY_ARCH: "armhf"
-
 # Jobs
 # Alpine 3.9
-build_amd64_master_3.9:
-  extends: .build_amd64
-  variables:
-    BUILD_TAG: "3.9"
-    DOCKER_TAG: "3.9"
-
-build_arm64_master_3.9:
-  extends: .build_arm64
-  variables:
-    BUILD_TAG: "3.9"
-    DOCKER_TAG: "3.9"
-
-build_armv7_master_3.9:
-  extends: .build_armv7
+build_master_3.9:
+  extends: .build
   variables:
     BUILD_TAG: "3.9"
     DOCKER_TAG: "3.9"
 
 # Alpine 3.10
-build_amd64_master_3.10:
-  extends: .build_amd64
-  variables:
-    BUILD_TAG: "3.10"
-    DOCKER_TAG: "3.10"
-
-build_arm64_master_3.10:
-  extends: .build_arm64
-  variables:
-    BUILD_TAG: "3.10"
-    DOCKER_TAG: "3.10"
-
-build_armv7_master_3.10:
-  extends: .build_armv7
+build_master_3.10:
+  extends: .build
   variables:
     BUILD_TAG: "3.10"
     DOCKER_TAG: "3.10"
 
 # Alpine 3.11
-build_amd64_master_3.11:
-  extends: .build_amd64
-  variables:
-    BUILD_TAG: "3.11"
-    DOCKER_TAG: "3.11"
-
-build_arm64_master_3.11:
-  extends: .build_arm64
-  variables:
-    BUILD_TAG: "3.11"
-    DOCKER_TAG: "3.11"
-
-build_armv7_master_3.11:
-  extends: .build_armv7
+build_master_3.11:
+  extends: .build
   variables:
     BUILD_TAG: "3.11"
     DOCKER_TAG: "3.11"
 
 # Alpine edge
-build_amd64_master_edge:
-  extends: .build_amd64
-  variables:
-    BUILD_TAG: "edge"
-    DOCKER_TAG: "edge"
-
-build_arm64_master_edge:
-  extends: .build_arm64
-  variables:
-    BUILD_TAG: "edge"
-    DOCKER_TAG: "edge"
-
-build_armv7_master_edge:
-  extends: .build_armv7
+build_master_edge:
+  extends: .build
   variables:
     BUILD_TAG: "edge"
     DOCKER_TAG: "edge"
 
 # PRs/branches
-build_amd64_ci:
-  extends: .build_amd64
-  variables:
-    BUILD_TAG: "edge"
-    DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"
-  only:
-  except:
-    - master
-
-build_arm64_ci:
-  extends: .build_arm64
-  variables:
-    BUILD_TAG: "edge"
-    DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"
-  only:
-  except:
-    - master
-
-build_armv7_ci:
-  extends: .build_armv7
+build_ci:
+  extends: .build
   variables:
     BUILD_TAG: "edge"
     DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"

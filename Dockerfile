@@ -3,7 +3,6 @@ FROM alpine:${TAG}
 
 # Args
 ARG TAG
-ARG OVERLAY_ARCH
 ARG OVERLAY_VERSION="v1.22.1.0"
 
 # Labels
@@ -30,6 +29,14 @@ RUN \
     tzdata \
     xz && \
   echo "**** Add s6 overlay ****" && \
+  OVERLAY_ARCH=""; ARCH=$(uname -m) \
+  if [ "${ARCH}" = "x86_64" ]; then \
+    OVERLAY_ARCH="amd64" \
+  elif [ "${ARCH}" = "aarch64" ]; then \
+    OVERLAY_ARCH="aarch64" \
+  elif [ "${ARCH}" = "armv7l" ]; then \
+    OVERLAY_ARCH="armhf" \
+  fi \
   curl -o \
   /tmp/s6-overlay.tar.gz -L \
     "https://github.com/just-containers/s6-overlay/releases/download/${OVERLAY_VERSION}/s6-overlay-${OVERLAY_ARCH}.tar.gz" && \
