@@ -1,49 +1,156 @@
-image: docker:stable
-services:
-  - docker:stable-dind
+stages:
+  - build
 
-before_script:
-  - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" ${CI_REGISTRY}
+# Common variables
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_CERT_PATH: "/certs/client"
 
+# Build templates
 .build:
+  stage: build
+  image: docker:stable
+  services:
+    - name: docker:stable-dind
+      command: ["--experimental"]
   variables:
-    TAG: "null"
+    PLATFORM: ""
+    OVERLAY_ARCH: ""
+    BUILD_TAG: ""
+    DOCKER_TAG: ""
+  tags:
+    - docker
+  before_script:
+    - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" ${CI_REGISTRY}
+    - docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
   script:
-    - docker build --pull --build-arg=TAG=${TAG} -t "${CI_REGISTRY_IMAGE}:${TAG}" .
-    - docker push "${CI_REGISTRY_IMAGE}:${TAG}"
+    - docker build --pull --platform "${PLATFORM}" --build-arg="TAG=${BUILD_TAG}" --build-arg="OVERLAY_ARCH=${OVERLAY_ARCH}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}" .
+    - docker push "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}"
   only:
     - master
 
-build-master-3.9:
+.build_amd64:
   extends: .build
-  stage: build
   variables:
-    TAG: "3.9"
+    PLATFORM: "linux/amd64"
+    OVERLAY_ARCH: "amd64"
 
-build-master-3.10:
+.build_arm64:
   extends: .build
-  stage: build
   variables:
-    TAG: "3.10"
+    PLATFORM: "linux/arm64"
+    OVERLAY_ARCH: "aarch64"
 
-build-master-3.11:
+.build_armv7:
   extends: .build
-  stage: build
   variables:
-    TAG: "3.11"
+    PLATFORM: "linux/arm/v7"
+    OVERLAY_ARCH: "armhf"
 
-build-master-edge:
-  extends: .build
-  stage: build
+# Jobs
+# Alpine 3.9
+build_amd64_master_3.9:
+  extends: .build_amd64
   variables:
-    TAG: "edge"
+    BUILD_TAG: "3.9"
+    DOCKER_TAG: "3.9"
 
-build:
-  stage: build
+build_arm64_master_3.9:
+  extends: .build_arm64
   variables:
-    TAG: "edge"
-  script:
-    - docker build --pull --build-arg=TAG=${TAG} -t "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}" .
-    - docker push "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    BUILD_TAG: "3.9"
+    DOCKER_TAG: "3.9"
+
+build_armv7_master_3.9:
+  extends: .build_armv7
+  variables:
+    BUILD_TAG: "3.9"
+    DOCKER_TAG: "3.9"
+
+# Alpine 3.10
+build_amd64_master_3.10:
+  extends: .build_amd64
+  variables:
+    BUILD_TAG: "3.10"
+    DOCKER_TAG: "3.10"
+
+build_arm64_master_3.10:
+  extends: .build_arm64
+  variables:
+    BUILD_TAG: "3.10"
+    DOCKER_TAG: "3.10"
+
+build_armv7_master_3.10:
+  extends: .build_armv7
+  variables:
+    BUILD_TAG: "3.10"
+    DOCKER_TAG: "3.10"
+
+# Alpine 3.11
+build_amd64_master_3.11:
+  extends: .build_amd64
+  variables:
+    BUILD_TAG: "3.11"
+    DOCKER_TAG: "3.11"
+
+build_arm64_master_3.11:
+  extends: .build_arm64
+  variables:
+    BUILD_TAG: "3.11"
+    DOCKER_TAG: "3.11"
+
+build_armv7_master_3.11:
+  extends: .build_armv7
+  variables:
+    BUILD_TAG: "3.11"
+    DOCKER_TAG: "3.11"
+
+# Alpine edge
+build_amd64_master_edge:
+  extends: .build_amd64
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "edge"
+
+build_arm64_master_edge:
+  extends: .build_arm64
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "edge"
+
+build_armv7_master_edge:
+  extends: .build_armv7
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "edge"
+
+# PRs/branches
+build_amd64_ci:
+  extends: .build_amd64
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"
+  only:
+  except:
+    - master
+
+build_arm64_ci:
+  extends: .build_arm64
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"
+  only:
+  except:
+    - master
+
+build_armv7_ci:
+  extends: .build_armv7
+  variables:
+    BUILD_TAG: "edge"
+    DOCKER_TAG: "${CI_COMMIT_SHORT_SHA}"
+  only:
   except:
     - master
