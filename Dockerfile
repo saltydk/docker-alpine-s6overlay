@@ -29,16 +29,13 @@ RUN \
     tzdata \
     xz && \
   echo "**** Add s6 overlay ****" && \
-  OVERLAY_ARCH=""; ARCH=$(uname -m) \
-  if [ "${ARCH}" = "x86_64" ]; then \
-    OVERLAY_ARCH="amd64" \
-  elif [ "${ARCH}" = "aarch64" ]; then \
-    OVERLAY_ARCH="aarch64" \
-  elif [ "${ARCH}" = "armv7l" ]; then \
-    OVERLAY_ARCH="armhf" \
-  fi \
-  curl -o \
-  /tmp/s6-overlay.tar.gz -L \
+  # Find arch for archive
+  ARCH=$(uname -m) && \
+  OVERLAY_ARCH="" && \
+  [ "${ARCH}" = "x86_64" ] && OVERLAY_ARCH="amd64" || true && \
+  [ "${ARCH}" = "aarch64" ] && OVERLAY_ARCH="aarch64" || true && \
+  [ "${ARCH}" = "armv7l" ] && OVERLAY_ARCH="armhf" || true && \
+  curl -o /tmp/s6-overlay.tar.gz -L \
     "https://github.com/just-containers/s6-overlay/releases/download/${OVERLAY_VERSION}/s6-overlay-${OVERLAY_ARCH}.tar.gz" && \
   tar xfz \
     /tmp/s6-overlay.tar.gz -C / && \
