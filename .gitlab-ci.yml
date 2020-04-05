@@ -33,7 +33,7 @@ variables:
     - docker build --pull --platform "linux/arm/v7" --build-arg="TAG=${BUILD_TAG}" -t "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-armv7" .
     - docker push "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-armv7"
     - docker manifest create "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-amd64" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-arm64" "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}-armv7"
-    - docker push "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}"
+    - docker manifest push "${CI_REGISTRY_IMAGE}:${DOCKER_TAG}"
   only:
     - master
 
