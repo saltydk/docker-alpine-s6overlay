@@ -59,6 +59,13 @@ build_master_3.11:
     BUILD_TAG: "3.11"
     DOCKER_TAG: "3.11"
 
+# Alpine 3.12
+build_master_3.12:
+  extends: .build
+  variables:
+    BUILD_TAG: "3.12"
+    DOCKER_TAG: "3.12"
+
 # Alpine edge
 build_master_edge:
   extends: .build
