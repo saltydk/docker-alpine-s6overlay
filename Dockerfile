@@ -16,6 +16,8 @@ ENV \
 
 RUN \
   echo "**** Building Alpine ${TAG} ****" && \
+  echo "**** Upgrade alpine base ****" && \
+  apk upgrade --no-cache -U && \
   echo "**** Install build packages ****" && \
   apk add --no-cache -U --virtual=build-dependencies \
     tar && \
