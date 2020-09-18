@@ -3,7 +3,7 @@ FROM alpine:${TAG}
 
 # Args
 ARG TAG
-ARG OVERLAY_VERSION="v2.0.0.1"
+ARG OVERLAY_VERSION="v2.1.0.0"
 
 # Labels
 LABEL VERSION="Alpine ${TAG}"
