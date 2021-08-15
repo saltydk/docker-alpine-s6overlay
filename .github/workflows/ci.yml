@@ -8,6 +8,9 @@ on:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    env:
+      BUILD_TAG: "3.13"
+      DOCKER_TAG: "3.13"
     steps:
       -
         name: Set up QEMU
