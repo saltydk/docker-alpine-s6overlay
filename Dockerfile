@@ -1,12 +1,10 @@
-ARG TAG=
-FROM alpine:${TAG}
+FROM alpine:3.13
 
 # Args
-ARG TAG
 ARG OVERLAY_VERSION="v2.2.0.3"
 
 # Labels
-LABEL VERSION="Alpine ${TAG}"
+LABEL VERSION="Alpine 3.13"
 
 # Environment variables
 ENV \
@@ -15,7 +13,7 @@ ENV \
   TERM="xterm"
 
 RUN \
-  echo "**** Building Alpine ${TAG} ****" && \
+  echo "**** Building Alpine 3.13 ****" && \
   echo "**** Upgrade alpine base ****" && \
   apk upgrade --no-cache -U && \
   echo "**** Install build packages ****" && \
