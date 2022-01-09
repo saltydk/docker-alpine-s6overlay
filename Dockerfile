@@ -1,59 +1,32 @@
-FROM alpine:3.13
+FROM alpine:3.15
 
-# Args
-ARG OVERLAY_VERSION="v2.2.0.3"
+ENV PUID="1000" PGID="1000" UMASK="002" TZ="Etc/UTC"
+ENV XDG_CONFIG_HOME="/config/.config" XDG_CACHE_HOME="/config/.cache" XDG_DATA_HOME="/config/.local/share" LANG="C.UTF-8" LC_ALL="C.UTF-8"
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 
-# Labels
-LABEL VERSION="Alpine 3.13"
+VOLUME ["/config"]
+ENTRYPOINT ["/init"]
 
-# Environment variables
-ENV \
-  PS1="$(whoami)@$(hostname):$(pwd)\\$ " \
-  HOME="/root" \
-  TERM="xterm"
+# install packages
+RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findutils python3 unzip p7zip ca-certificates unrar xz
 
+# make folders
+RUN mkdir /config && \
+# create user
+    useradd -u 1000 -U -d /config -s /bin/false abc && \
+    usermod -G users abc
+
+# https://github.com/just-containers/s6-overlay/releases
+ARG S6_VERSION=2.2.0.3
+
+# install s6-overlay
 RUN \
-  echo "**** Building Alpine 3.13 ****" && \
-  echo "**** Upgrade alpine base ****" && \
-  apk upgrade --no-cache -U && \
-  echo "**** Install build packages ****" && \
-  apk add --no-cache -U --virtual=build-dependencies \
-    tar && \
-  echo "**** Install runtime packages ****" && \
-  apk add --no-cache -U \
-    bash \
-    ca-certificates \
-    coreutils \
-    curl \
-    shadow \
-    tzdata \
-    xz && \
-  echo "**** Add s6 overlay ****" && \
-  # Find arch for archive
+# Find arch for archive
   ARCH=$(uname -m) && \
   OVERLAY_ARCH="" && \
   [ "${ARCH}" = "x86_64" ] && OVERLAY_ARCH="amd64" || true && \
   [ "${ARCH}" = "aarch64" ] && OVERLAY_ARCH="aarch64" || true && \
   [ "${ARCH}" = "armv7l" ] && OVERLAY_ARCH="armhf" || true && \
-  curl -o /tmp/s6-overlay.tar.gz -L \
-    "https://github.com/just-containers/s6-overlay/releases/download/${OVERLAY_VERSION}/s6-overlay-${OVERLAY_ARCH}.tar.gz" && \
-  tar xfz \
-    /tmp/s6-overlay.tar.gz -C / && \
-  echo "**** Create abc user and make our folders ****" && \
-  groupmod -g 1000 users && \
-  useradd -u 911 -U -d /config -s /bin/false abc && \
-  usermod -G users abc && \
-  mkdir -p \
-    /app \
-    /config \
-    /defaults && \
-  echo "**** Cleanup ****" && \
-  apk del --purge \
-    build-dependencies && \
-  rm -rf \
-    /tmp/*
+  curl -fsSL "https://github.com/just-containers/s6-overlay/releases/download/v${S6_VERSION}/s6-overlay-${OVERLAY_ARCH}.tar.gz" | tar xzf - -C /
 
-# Add extra files
 COPY root/ /
-
-ENTRYPOINT ["/init"]
