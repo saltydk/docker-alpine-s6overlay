@@ -1,4 +1,4 @@
-FROM alpine:3.15
+FROM alpine:3.14
 
 ENV PUID="1000" PGID="1000" UMASK="002" TZ="Etc/UTC"
 ENV XDG_CONFIG_HOME="/config/.config" XDG_CACHE_HOME="/config/.cache" XDG_DATA_HOME="/config/.local/share" LANG="C.UTF-8" LC_ALL="C.UTF-8"
@@ -8,7 +8,8 @@ VOLUME ["/config"]
 ENTRYPOINT ["/init"]
 
 # install packages
-RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findutils python3 unzip p7zip ca-certificates xz
+RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findutils python3 unzip p7zip ca-certificates xz && \
+    apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.14/main unrar
 
 # make folders
 RUN mkdir /config && \
