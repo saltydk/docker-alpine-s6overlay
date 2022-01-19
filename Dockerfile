@@ -15,7 +15,7 @@ RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findut
 RUN mkdir -p \
     /app \
     /config \
-    /default && \
+    /defaults && \
 # create user
     useradd -u 1000 -U -d /config -s /bin/false abc && \
     usermod -G users abc
