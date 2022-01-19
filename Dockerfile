@@ -12,7 +12,10 @@ RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findut
     apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.14/main unrar
 
 # make folders
-RUN mkdir /config && \
+RUN mkdir -p \
+    /app \
+    /config \
+    /default &&
 # create user
     useradd -u 1000 -U -d /config -s /bin/false abc && \
     usermod -G users abc
