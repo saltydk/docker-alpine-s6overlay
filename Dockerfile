@@ -1,4 +1,15 @@
-FROM alpine:3.14
+FROM alpine AS builder
+ARG UNRAR_VER=7.0.7
+ADD https://www.rarlab.com/rar/unrarsrc-${UNRAR_VER}.tar.gz /tmp/unrar.tar.gz
+RUN apk --update --no-cache add build-base && \
+    tar -xzf /tmp/unrar.tar.gz && \
+    cd unrar && \
+    sed -i 's|LDFLAGS=-pthread|LDFLAGS=-pthread -static|' makefile && \
+    sed -i 's|CXXFLAGS=-march=native |CXXFLAGS=|' makefile && \
+    make -f makefile && \
+    install -Dm 755 unrar /usr/bin/unrar
+
+FROM alpine:3.19
 
 ENV PUID="1000" PGID="1000" UMASK="002" TZ="Etc/UTC"
 ENV XDG_CONFIG_HOME="/config/.config" XDG_CACHE_HOME="/config/.cache" XDG_DATA_HOME="/config/.local/share" LANG="C.UTF-8" LC_ALL="C.UTF-8"
@@ -10,6 +21,8 @@ ENTRYPOINT ["/init"]
 # install packages
 RUN apk add --no-cache tzdata shadow bash curl wget jq grep sed coreutils findutils python3 unzip p7zip ca-certificates xz && \
     apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.14/main unrar
+
+COPY --from=builder /usr/bin/unrar /usr/bin/unrar
 
 # make folders
 RUN mkdir -p \
