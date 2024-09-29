@@ -1,5 +1,5 @@
 FROM alpine AS builder
-ARG UNRAR_VER=7.0.7
+ARG UNRAR_VER=7.0.9
 ADD https://www.rarlab.com/rar/unrarsrc-${UNRAR_VER}.tar.gz /tmp/unrar.tar.gz
 RUN apk --update --no-cache add build-base && \
     tar -xzf /tmp/unrar.tar.gz && \
