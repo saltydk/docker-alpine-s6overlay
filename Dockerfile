@@ -9,7 +9,7 @@ RUN apk --update --no-cache add build-base && \
     make -f makefile && \
     install -Dm 755 unrar /usr/bin/unrar
 
-FROM alpine:3.19
+FROM alpine:3.21.0
 
 ENV PUID="1000" PGID="1000" UMASK="002" TZ="Etc/UTC"
 ENV XDG_CONFIG_HOME="/config/.config" XDG_CACHE_HOME="/config/.cache" XDG_DATA_HOME="/config/.local/share" LANG="C.UTF-8" LC_ALL="C.UTF-8"
