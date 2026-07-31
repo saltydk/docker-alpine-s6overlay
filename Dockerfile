@@ -1,5 +1,5 @@
-FROM alpine AS builder
-ARG UNRAR_VER=7.1.10
+FROM alpine:3.24 AS builder
+ARG UNRAR_VER=7.2.7
 ADD https://www.rarlab.com/rar/unrarsrc-${UNRAR_VER}.tar.gz /tmp/unrar.tar.gz
 RUN apk --update --no-cache add build-base && \
     tar -xzf /tmp/unrar.tar.gz && \
@@ -9,7 +9,7 @@ RUN apk --update --no-cache add build-base && \
     make -f makefile && \
     install -Dm 755 unrar /usr/bin/unrar
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 ENV PUID="1000" PGID="1000" UMASK="002" TZ="Etc/UTC"
 ENV XDG_CONFIG_HOME="/config/.config" XDG_CACHE_HOME="/config/.cache" XDG_DATA_HOME="/config/.local/share" LANG="C.UTF-8" LC_ALL="C.UTF-8"
@@ -33,7 +33,7 @@ RUN mkdir -p \
     usermod -G users abc
 
 # https://github.com/just-containers/s6-overlay/releases
-ARG S6_VERSION=3.2.2.0
+ARG S6_VERSION=3.2.3.2
 
 # install s6-overlay
 RUN \
