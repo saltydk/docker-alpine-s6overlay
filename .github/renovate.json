@@ -1,0 +1,106 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":separateMajorReleases",
+    ":ignoreUnstable"
+  ],
+  "baseBranchPatterns": [
+    "$default"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "dependencyDashboard": true,
+  "rebaseWhen": "conflicted",
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "addLabels": [
+      "security",
+      "vulnerability"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Keep the two Alpine stages together",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "alpine"
+      ],
+      "groupName": "alpine base image",
+      "pinDigests": true
+    },
+    {
+      "description": "Group GitHub Actions patch updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Automerge digest and patch updates after acceptance",
+      "matchUpdateTypes": [
+        "digest",
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Review minor and major updates",
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "manual-review"
+      ]
+    },
+    {
+      "description": "Extract UnRAR versions from the RARLab download page",
+      "matchDatasources": [
+        "custom.rarlab"
+      ],
+      "extractVersion": "(?:^|/)unrarsrc-(?<version>\\d+\\.\\d+\\.\\d+)\\.tar\\.gz$"
+    }
+  ],
+  "customDatasources": {
+    "rarlab": {
+      "defaultRegistryUrlTemplate": "https://www.rarlab.com/rar_add.htm",
+      "format": "html"
+    }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Version arguments with Renovate annotations",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?(?: versioning=(?<versioning>\\S+))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Pinned Trivy scanner version",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+TRIVY_VERSION:\\s+(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "semver-coerced"
+    }
+  ]
+}
