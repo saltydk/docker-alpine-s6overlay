@@ -41,6 +41,12 @@ jobs:
       - name: Check workflows
         uses: docker://rhysd/actionlint:1.7.12
 
+      - name: Prime Trivy binary cache
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+          version: ${{ env.TRIVY_VERSION }}
+
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -137,6 +143,54 @@ jobs:
           category: alpine-s6overlay-${{ matrix.slug }}
           sarif_file: trivy-${{ matrix.slug }}.sarif
 
+      - name: Generate Docker Scout vulnerability report
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          sarif-file: scout-${{ matrix.slug }}.sarif
+          write-comment: false
+
+      - name: Upload Docker Scout vulnerability report
+        if: always() && github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: scout-alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: scout-${{ matrix.slug }}.sarif
+
+      - name: Enforce actionable Docker Scout findings
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-fixed: true
+          only-severities: critical,high
+          exit-code: true
+          summary: false
+          write-comment: false
+
+      - name: Enforce CISA KEV Docker Scout findings
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-cisa-kev: true
+          exit-code: true
+          summary: false
+          write-comment: false
+
   scan-published:
     needs:
       - static
@@ -191,6 +245,54 @@ jobs:
           category: alpine-s6overlay-${{ matrix.slug }}
           sarif_file: trivy-${{ matrix.slug }}.sarif
 
+      - name: Generate Docker Scout vulnerability report
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          sarif-file: scout-${{ matrix.slug }}.sarif
+          write-comment: false
+
+      - name: Upload Docker Scout vulnerability report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: scout-alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: scout-${{ matrix.slug }}.sarif
+
+      - name: Enforce actionable Docker Scout findings
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-fixed: true
+          only-severities: critical,high
+          exit-code: true
+          summary: false
+          write-comment: false
+
+      - name: Enforce CISA KEV Docker Scout findings
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-cisa-kev: true
+          exit-code: true
+          summary: false
+          write-comment: false
+
   publish:
     needs:
       - static
@@ -211,6 +313,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.3.0
 
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: type=sha,format=long,prefix=sha-
+
       - name: Login to Docker Hub
         uses: docker/login-action@v4.6.0
         with:
@@ -218,19 +327,55 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Publish image
+        id: docker-build
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           pull: true
           push: true
-          tags: ${{ env.IMAGE }}:latest
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           cache-from: |
             type=gha,scope=base-amd64
             type=gha,scope=base-arm64
             type=gha,scope=base-arm-v7
           cache-to: type=gha,scope=base-publish,mode=max
+
+      - name: Verify published SHA tag and SBOM
+        env:
+          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
+        run: |
+          details=$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" --format '{{json .}}')
+          [[ "$(jq -r .manifest.digest <<< "$details")" == "$PUBLISHED_DIGEST" ]]
+          [[ "$(jq -r '[.manifest.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | sort | join(",")' <<< "$details")" == "linux/amd64,linux/arm/v7,linux/arm64" ]]
+
+          image_digests=$(jq -r '.manifest.manifests[] | select(.platform.architecture != "unknown") | .digest' <<< "$details" | sort | paste -sd, -)
+          sbom_subjects=$(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]' <<< "$details" | sort | paste -sd, -)
+          [[ "$sbom_subjects" == "$image_digests" ]]
+
+          for platform in linux/amd64 linux/arm64 linux/arm/v7; do
+            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["org.opencontainers.image.revision"]' <<< "$details")" == "$GITHUB_SHA" ]]
+          done
+
+          while read -r attestation_digest; do
+            attestation=$(docker buildx imagetools inspect "${IMAGE}@${attestation_digest}" --raw)
+            [[ "$(jq -c '[.layers[].annotations["in-toto.io/predicate-type"]] | sort' <<< "$attestation")" == '["https://spdx.dev/Document"]' ]]
+          done < <(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<< "$details")
+
+      - name: Promote verified image to latest
+        env:
+          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
+        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${PUBLISHED_DIGEST}"
+
+      - name: Verify latest alias
+        env:
+          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
+        run: |
+          latest=$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}')
+          [[ "$(jq -r .digest <<< "$latest")" == "$PUBLISHED_DIGEST" ]]
 
   acceptance:
     if: always()
