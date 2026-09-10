@@ -1,4 +1,6 @@
 import hashlib
+import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -7,11 +9,51 @@ import unittest
 from scripts.package_locks import (
     LockError, PackageLock, inventory, package_changes, parse_lock,
     read_requests, requests_digest, resolve_lock, validate_lock, write_locks, BaseUpdateRequired,
-    input_files_digest,
+    input_files_digest, platform_image_reference,
 )
 
 
 PARENT = "alpine:3.24@sha256:" + "a" * 64
+AMD64_PARENT = "alpine:3.24@sha256:" + "1" * 64
+ARM64_PARENT = "alpine:3.24@sha256:" + "2" * 64
+
+
+def manifest_result(command, manifests=None):
+    if manifests is None:
+        manifests = [
+            {"digest": "sha256:" + "1" * 64, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": "sha256:" + "2" * 64, "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}},
+        ]
+    return subprocess.CompletedProcess(command, 0, json.dumps({"schemaVersion": 2, "manifests": manifests}), "")
+
+
+class PlatformReferenceTests(unittest.TestCase):
+    def test_distinct_platforms_use_distinct_immutable_child_digests(self):
+        self.assertEqual(platform_image_reference(PARENT, "linux/amd64", runner=manifest_result), AMD64_PARENT)
+        self.assertEqual(platform_image_reference(PARENT, "linux/arm64", runner=manifest_result), ARM64_PARENT)
+
+    def test_missing_duplicate_and_invalid_platform_descriptors_fail_closed(self):
+        valid = {"digest": "sha256:" + "1" * 64, "platform": {"os": "linux", "architecture": "amd64"}}
+        for descriptors in ([], [valid, valid], [{**valid, "digest": "sha256:invalid"}]):
+            with self.subTest(descriptors=descriptors), self.assertRaises(LockError):
+                platform_image_reference(PARENT, "linux/amd64", runner=lambda command: manifest_result(command, descriptors))
+
+    def test_arm_variant_is_selected_without_matching_other_arm_variants(self):
+        descriptors = [
+            {"digest": "sha256:" + "6" * 64, "platform": {"os": "linux", "architecture": "arm", "variant": "v6"}},
+            {"digest": "sha256:" + "7" * 64, "platform": {"os": "linux", "architecture": "arm", "variant": "v7"}},
+            {"digest": "sha256:" + "8" * 64, "platform": {"os": "linux", "architecture": "arm", "variant": ["v7"]}},
+        ]
+        self.assertEqual(platform_image_reference(PARENT, "linux/arm/v7", runner=lambda command: manifest_result(command, descriptors)),
+                         "alpine:3.24@sha256:" + "7" * 64)
+
+    def test_single_platform_manifest_keeps_its_pinned_reference(self):
+        def runner(command):
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                "schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"digest": "sha256:" + "3" * 64}, "layers": [],
+            }), "")
+        self.assertEqual(platform_image_reference(AMD64_PARENT, "linux/amd64", runner=runner), AMD64_PARENT)
 
 
 class PackageLockTests(unittest.TestCase):
@@ -86,8 +128,10 @@ class PackageLockTests(unittest.TestCase):
             requests.parent.mkdir(parents=True)
             requests.write_text("xz\n")
             def runner(command):
+                if command[:3] == ["docker", "buildx", "imagetools"]:
+                    return manifest_result(command)
                 self.assertIn("linux/arm64", command)
-                self.assertIn(PARENT, command)
+                self.assertIn(ARM64_PARENT, command)
                 self.assertEqual(command[-1], "inherited")
                 return subprocess.CompletedProcess(command, 0, "xz=5.8.4-r0\n", "")
             lock = resolve_lock(root, "runtime", "linux/arm64", PARENT,
@@ -111,6 +155,26 @@ class PackageLockTests(unittest.TestCase):
                 resolve_lock(root, "runtime", "linux/amd64", PARENT, runner=runner)
             self.assertEqual(path.read_text(), "preserve me\n")
 
+    def test_resolver_rejects_wrong_actual_architecture_before_installing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "packages/runtime"
+            profile.mkdir(parents=True)
+            (profile / "requested.txt").write_text("xz\n")
+            binary = root / "bin"
+            binary.mkdir()
+            apk = binary / "apk"
+            apk.write_text("#!/bin/sh\nprintf 'x86_64\\n'\n")
+            apk.chmod(0o755)
+            def runner(command):
+                if command[:3] == ["docker", "buildx", "imagetools"]:
+                    return manifest_result(command)
+                entry = command.index("--entrypoint")
+                return subprocess.run(["/bin/sh", *command[entry + 3:]], capture_output=True, text=True,
+                                      env={**os.environ, "PATH": str(binary) + ":" + os.environ["PATH"]})
+            with self.assertRaisesRegex(LockError, "expected aarch64, got x86_64"):
+                resolve_lock(root, "runtime", "linux/arm64", PARENT, inherited=True, runner=runner)
+
     def test_only_base_conflicts_and_missing_helpers_request_a_base_update(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -123,6 +187,8 @@ class PackageLockTests(unittest.TestCase):
                 ("apk-lock: failed to resolve inherited packages: temporary error (try again later)", LockError),
             ):
                 def runner(command):
+                    if command[:3] == ["docker", "buildx", "imagetools"]:
+                        return manifest_result(command)
                     return subprocess.CompletedProcess(command, 1, "", diagnostic)
                 with self.subTest(diagnostic=diagnostic), self.assertRaises(LockError) as caught:
                     resolve_lock(root, "runtime", "linux/amd64", PARENT, inherited=True, runner=runner)

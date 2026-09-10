@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -125,6 +126,49 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
+def platform_image_reference(parent: str, platform: str, *, runner=run) -> str:
+    """Use a child manifest so classic Docker stores can hold each architecture."""
+    if platform not in ARCHITECTURES or not PARENT.fullmatch(parent):
+        raise LockError("platform selection requires a supported platform and digest-pinned parent")
+    completed = runner(["docker", "buildx", "imagetools", "inspect", parent, "--raw"])
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise LockError(f"failed to inspect parent for {platform}: {detail}")
+    try:
+        manifest = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise LockError(f"invalid parent manifest for {platform}") from error
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+        raise LockError(f"invalid parent manifest for {platform}")
+    descriptors = manifest.get("manifests")
+    if not isinstance(descriptors, list):
+        if (manifest.get("schemaVersion") == 2 and isinstance(manifest.get("config"), dict)
+                and isinstance(manifest.get("layers"), list)):
+            return parent
+        raise LockError(f"parent manifest has no image or platform list for {platform}")
+    operating_system, architecture, *variant = platform.split("/")
+    if variant:
+        variants = {variant[0]}
+    elif architecture == "arm64":
+        variants = {"", "v8"}
+    else:
+        variants = {"", "v1"}
+    matches = []
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict) or not isinstance(descriptor.get("platform"), dict):
+            continue
+        metadata = descriptor["platform"]
+        if (metadata.get("os") == operating_system and metadata.get("architecture") == architecture
+                and isinstance(metadata.get("variant", ""), str) and metadata.get("variant", "") in variants):
+            matches.append(descriptor.get("digest"))
+    if len(matches) != 1:
+        raise LockError(f"parent manifest must contain exactly one image for {platform}")
+    digest = matches[0]
+    if not isinstance(digest, str) or not digest.startswith("sha256:") or not SHA256.fullmatch(digest[7:]):
+        raise LockError(f"parent manifest has an invalid image digest for {platform}")
+    return parent.partition("@")[0] + "@" + digest
+
+
 def resolve_lock(root: Path, profile: str, platform: str, parent: str, *,
                  inherited: bool = False, helper: Path | None = None, runner=run) -> PackageLock:
     if platform not in ARCHITECTURES:
@@ -133,14 +177,23 @@ def resolve_lock(root: Path, profile: str, platform: str, parent: str, *,
         raise LockError("package resolution requires a parent image pinned by SHA-256 digest")
     requests_path = (root / "packages" / profile / "requested.txt").resolve()
     requests = read_requests(requests_path)
+    image = platform_image_reference(parent, platform, runner=runner)
     command = ["docker", "run", "--rm", "--pull=always", "--platform", platform,
                "--mount", f"type=bind,source={requests_path},target=/tmp/apk-requests.txt,readonly"]
     executable = "/usr/local/libexec/apk-lock"
     if helper is not None:
         executable = "/tmp/apk-lock"
         command.extend(["--mount", f"type=bind,source={helper.resolve()},target={executable},readonly"])
-    command.extend(["--entrypoint", "/bin/sh", parent, executable,
-                    "resolve", "/tmp/apk-requests.txt", "inherited" if inherited else "base"])
+    script = '''actual=$(apk --print-arch)
+if [ "$actual" != "$1" ]; then
+  printf 'package architecture mismatch: expected %s, got %s\\n' "$1" "$actual" >&2
+  exit 1
+fi
+exec /bin/sh "$2" resolve "$3" "$4"
+'''
+    command.extend(["--entrypoint", "/bin/sh", image, "-ec", script, "apk-lock",
+                    ARCHITECTURES[platform], executable, "/tmp/apk-requests.txt",
+                    "inherited" if inherited else "base"])
     completed = runner(command)
     if completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
