@@ -141,4 +141,5 @@ jobs:
       scan-published: ${{ (needs.update-source.outputs.scan-published || needs.source.outputs.scan-published) == 'true' }}
       publish: ${{ (needs.update-source.outputs.publish || needs.source.outputs.publish) == 'true' }}
       event-name: ${{ github.event_name }}
+      has-update-report: ${{ needs.update-source.result == 'success' }}
     secrets: inherit

@@ -23,6 +23,10 @@ on:
         description: Original caller event name
         required: true
         type: string
+      has-update-report:
+        description: The caller uploaded an update report
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -582,6 +586,7 @@ jobs:
           merge-multiple: true
 
       - name: Download update report
+        if: inputs.has-update-report
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
