@@ -1,0 +1,664 @@
+name: reusable-build
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        description: Exact source revision to check out, label, test, and publish
+        required: true
+        type: string
+      should-build:
+        description: Build and evaluate candidates
+        required: true
+        type: boolean
+      scan-published:
+        description: Scan the published image when no build is required
+        required: true
+        type: boolean
+      publish:
+        description: Publish accepted candidates
+        required: true
+        type: boolean
+      event-name:
+        description: Original caller event name
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  IMAGE: saltydk/alpine-s6overlay
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.74.0
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    outputs:
+      input-sha: ${{ steps.inputs.outputs.input-sha }}
+      locks-sha: ${{ steps.inputs.outputs.locks-sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+
+      - name: Run package-lock tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Verify committed image inputs
+        id: inputs
+        run: |
+          python3 scripts/manage_inputs.py verify --github-output "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          from pathlib import Path
+          from scripts.package_locks import locks_digest
+          print(f"locks-sha={locks_digest(Path('.'))}")
+          PY
+
+      - name: Check shell scripts
+        run: |
+          shellcheck -s sh root/etc/cont-init.d/10-adduser
+          shellcheck scripts/apk-lock.sh scripts/test-image.sh
+
+      - name: Check workflows
+        uses: docker://rhysd/actionlint:1.7.12
+
+      - name: Prime Trivy binary cache
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+          version: ${{ env.TRIVY_VERSION }}
+
+  test-candidate:
+    needs: static
+    if: inputs.should-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: amd64
+            architecture: x86_64
+            apk_architecture: x86_64
+          - platform: linux/arm64
+            slug: arm64
+            architecture: aarch64
+            apk_architecture: aarch64
+          - platform: linux/arm/v7
+            slug: arm-v7
+            architecture: armv7l
+            apk_architecture: armv7
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Capture published baseline
+        run: >-
+          python3 scripts/build_report.py snapshot
+          --repository "$GITHUB_REPOSITORY"
+          --image alpine-s6overlay
+          --platform "${{ matrix.platform }}"
+          --stage runtime
+          --reference "${IMAGE}:latest"
+          --source-sha "${{ inputs.source-sha }}"
+          --output runtime-baseline.json
+
+      - name: Capture published builder baseline
+        run: >-
+          python3 scripts/build_report.py snapshot
+          --repository "$GITHUB_REPOSITORY"
+          --image alpine-s6overlay
+          --platform "${{ matrix.platform }}"
+          --stage builder
+          --reference "${IMAGE}:latest"
+          --source-sha "${{ inputs.source-sha }}"
+          --output builder-baseline.json
+
+      - name: Build builder candidate
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          target: builder
+          load: true
+          platforms: ${{ matrix.platform }}
+          pull: true
+          tags: local/alpine-s6overlay:builder-${{ matrix.slug }}-${{ inputs.source-sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source-sha }}
+            io.saltydk.image-inputs.sha256=${{ needs.static.outputs.input-sha }}
+          build-args: |
+            APK_LOCKS_SHA256=${{ needs.static.outputs.locks-sha }}
+            IMAGE_INPUTS_SHA256=${{ needs.static.outputs.input-sha }}
+          cache-from: type=gha,scope=base-${{ matrix.slug }}
+
+      - name: Verify builder package inventory
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/build_report.py verify
+          --repository "$GITHUB_REPOSITORY"
+          --image alpine-s6overlay
+          --platform "${{ matrix.platform }}"
+          --stage builder
+          --candidate "local/alpine-s6overlay:builder-${{ matrix.slug }}-${{ inputs.source-sha }}"
+          --lock "packages/builder/${{ matrix.apk_architecture }}.lock"
+          --baseline builder-baseline.json
+          --source-sha "${{ inputs.source-sha }}"
+          --output "builder-${{ matrix.slug }}-report.json"
+
+      - name: Build candidate
+        if: ${{ !cancelled() }}
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: ${{ matrix.platform }}
+          pull: true
+          tags: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source-sha }}
+            io.saltydk.image-inputs.sha256=${{ needs.static.outputs.input-sha }}
+          build-args: |
+            APK_LOCKS_SHA256=${{ needs.static.outputs.locks-sha }}
+            IMAGE_INPUTS_SHA256=${{ needs.static.outputs.input-sha }}
+          cache-from: type=gha,scope=base-${{ matrix.slug }}
+          cache-to: type=gha,scope=base-${{ matrix.slug }},mode=max
+
+      - name: Test candidate
+        if: ${{ !cancelled() }}
+        run: >-
+          scripts/test-image.sh
+          "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
+          "${{ matrix.platform }}"
+          "${{ matrix.architecture }}"
+
+      - name: Verify candidate package inventory
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/build_report.py verify
+          --repository "$GITHUB_REPOSITORY"
+          --image alpine-s6overlay
+          --platform "${{ matrix.platform }}"
+          --stage runtime
+          --candidate "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
+          --lock "packages/runtime/${{ matrix.apk_architecture }}.lock"
+          --baseline runtime-baseline.json
+          --source-sha "${{ inputs.source-sha }}"
+          --output "runtime-${{ matrix.slug }}-report.json"
+
+      - name: Upload candidate report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: alpine-s6overlay-candidate-${{ matrix.slug }}
+          path: '*-${{ matrix.slug }}-report.json'
+          if-no-files-found: error
+
+      - name: Set up Trivy
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Generate vulnerability report
+        if: ${{ !cancelled() }}
+        run: |
+          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
+            "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
+
+      - name: Enforce vulnerability policy
+        if: ${{ !cancelled() }}
+        run: |
+          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 \
+            "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
+
+      - name: Upload vulnerability report
+        if: always() && (inputs.event-name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: trivy-${{ matrix.slug }}.sarif
+
+      - name: Generate Docker Scout vulnerability report
+        if: ${{ !cancelled() && inputs.event-name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          sarif-file: scout-${{ matrix.slug }}.sarif
+          write-comment: false
+
+      - name: Upload Docker Scout vulnerability report
+        if: always() && inputs.event-name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: scout-alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: scout-${{ matrix.slug }}.sarif
+
+      - name: Enforce actionable Docker Scout findings
+        if: ${{ !cancelled() && inputs.event-name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-fixed: true
+          only-severities: critical,high
+          exit-code: true
+          summary: false
+          write-comment: false
+
+      - name: Enforce CISA KEV Docker Scout findings
+        if: ${{ !cancelled() && inputs.event-name != 'pull_request' }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-cisa-kev: true
+          exit-code: true
+          summary: false
+          write-comment: false
+
+  scan-published:
+    needs: static
+    if: inputs.scan-published
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: amd64
+            architecture: x86_64
+          - platform: linux/arm64
+            slug: arm64
+            architecture: aarch64
+          - platform: linux/arm/v7
+            slug: arm-v7
+            architecture: armv7l
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.3.0
+
+      - name: Test published image
+        run: scripts/test-image.sh "${IMAGE}:latest" "${{ matrix.platform }}" "${{ matrix.architecture }}"
+
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Generate vulnerability report
+        run: |
+          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+            --platform "${{ matrix.platform }}" \
+            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
+            "${IMAGE}:latest"
+
+      - name: Enforce vulnerability policy
+        run: |
+          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+            --platform "${{ matrix.platform }}" \
+            --ignore-unfixed --exit-code 1 "${IMAGE}:latest"
+
+      - name: Upload vulnerability report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: trivy-${{ matrix.slug }}.sarif
+
+      - name: Generate Docker Scout vulnerability report
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          sarif-file: scout-${{ matrix.slug }}.sarif
+          write-comment: false
+
+      - name: Upload Docker Scout vulnerability report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: scout-alpine-s6overlay-${{ matrix.slug }}
+          sarif_file: scout-${{ matrix.slug }}.sarif
+
+      - name: Enforce actionable Docker Scout findings
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-fixed: true
+          only-severities: critical,high
+          exit-code: true
+          summary: false
+          write-comment: false
+
+      - name: Enforce CISA KEV Docker Scout findings
+        if: ${{ !cancelled() }}
+        uses: docker/scout-action@v1.24.0
+        with:
+          command: cves
+          image: registry://${{ env.IMAGE }}:latest
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-cisa-kev: true
+          exit-code: true
+          summary: false
+          write-comment: false
+
+  publish:
+    needs:
+      - static
+      - test-candidate
+    if: >-
+      always() &&
+      inputs.publish &&
+      inputs.should-build &&
+      needs.static.result == 'success' &&
+      needs.test-candidate.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      published-digest: ${{ steps.effective.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: type=raw,value=sha-${{ inputs.source-sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source-sha }}
+            io.saltydk.image-inputs.sha256=${{ needs.static.outputs.input-sha }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Inspect immutable SHA tag
+        id: existing
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: |
+          python3 scripts/build_report.py snapshot \
+            --repository "$GITHUB_REPOSITORY" \
+            --image alpine-s6overlay \
+            --platform linux/amd64 \
+            --stage runtime \
+            --reference "${IMAGE}:sha-${SOURCE_SHA}" \
+            --source-sha "$SOURCE_SHA" \
+            --output exact-sha-tag.json
+          baseline_status=$(jq -r '.images[0].baseline.status' exact-sha-tag.json)
+          case "$baseline_status" in
+            absent)
+              echo 'exists=false' >> "$GITHUB_OUTPUT"
+              ;;
+            available)
+              digest=$(jq -r '.images[0].baseline.digest' exact-sha-tag.json)
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              echo 'exists=true' >> "$GITHUB_OUTPUT"
+              echo "digest=$digest" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "SHA tag inspection returned unexpected baseline status: $baseline_status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Publish image
+        id: docker-build
+        if: steps.existing.outputs.exists == 'false'
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          pull: true
+          push: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APK_LOCKS_SHA256=${{ needs.static.outputs.locks-sha }}
+            IMAGE_INPUTS_SHA256=${{ needs.static.outputs.input-sha }}
+          provenance: false
+          cache-from: |
+            type=gha,scope=base-amd64
+            type=gha,scope=base-arm64
+            type=gha,scope=base-arm-v7
+          cache-to: type=gha,scope=base-publish,mode=max
+
+      - name: Select effective published digest
+        id: effective
+        env:
+          BUILT_DIGEST: ${{ steps.docker-build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+        run: |
+          digest=${EXISTING_DIGEST:-$BUILT_DIGEST}
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record immutable SHA publication
+        id: record-sha
+        env:
+          PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: echo "${IMAGE}:sha-${SOURCE_SHA}@${PUBLISHED_DIGEST}" > published-sha.txt
+
+      - name: Verify published SHA tag and SBOM
+        id: verify-sha
+        env:
+          INPUT_SHA: ${{ needs.static.outputs.input-sha }}
+          LOCKS_SHA: ${{ needs.static.outputs.locks-sha }}
+          PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: |
+          details=$(docker buildx imagetools inspect "${IMAGE}:sha-${SOURCE_SHA}" --format '{{json .}}')
+          [[ "$(jq -r .manifest.digest <<< "$details")" == "$PUBLISHED_DIGEST" ]]
+          [[ "$(jq -r '[.manifest.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | sort | join(",")' <<< "$details")" == "linux/amd64,linux/arm/v7,linux/arm64" ]]
+          image_digests=$(jq -r '.manifest.manifests[] | select(.platform.architecture != "unknown") | .digest' <<< "$details" | sort | paste -sd, -)
+          sbom_subjects=$(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]' <<< "$details" | sort | paste -sd, -)
+          [[ "$sbom_subjects" == "$image_digests" ]]
+          for platform in linux/amd64 linux/arm64 linux/arm/v7; do
+            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["org.opencontainers.image.revision"]' <<< "$details")" == "$SOURCE_SHA" ]]
+            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["io.saltydk.apk-locks.sha256"]' <<< "$details")" == "$LOCKS_SHA" ]]
+            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["io.saltydk.image-inputs.sha256"]' <<< "$details")" == "$INPUT_SHA" ]]
+          done
+          while read -r attestation_digest; do
+            attestation=$(docker buildx imagetools inspect "${IMAGE}@${attestation_digest}" --raw)
+            [[ "$(jq -c '[.layers[].annotations["in-toto.io/predicate-type"]] | sort' <<< "$attestation")" == '["https://spdx.dev/Document"]' ]]
+          done < <(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<< "$details")
+
+      - name: Promote verified image to latest
+        id: promote
+        env:
+          PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
+        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${PUBLISHED_DIGEST}"
+
+      - name: Verify latest alias
+        id: verify-latest
+        env:
+          PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
+        run: |
+          latest=$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}')
+          [[ "$(jq -r .digest <<< "$latest")" == "$PUBLISHED_DIGEST" ]]
+
+      - name: Record verified latest publication
+        id: record-latest
+        env:
+          PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
+        run: echo "${IMAGE}:latest@${PUBLISHED_DIGEST}" > published-latest.txt
+
+      - name: Capture publication outcomes
+        if: always()
+        run: |
+          {
+            echo "inspect=${{ steps.existing.outcome }}"
+            echo "build=${{ steps.docker-build.outcome }}"
+            echo "digest=${{ steps.effective.outcome }}"
+            echo "record-sha=${{ steps.record-sha.outcome }}"
+            echo "verify-sha=${{ steps.verify-sha.outcome }}"
+            echo "promote=${{ steps.promote.outcome }}"
+            echo "verify-latest=${{ steps.verify-latest.outcome }}"
+            echo "record-latest=${{ steps.record-latest.outcome }}"
+          } > publication-outcomes.txt
+
+      - name: Upload publication records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: alpine-s6overlay-publication
+          path: |
+            publication-outcomes.txt
+            published-*.txt
+          if-no-files-found: error
+
+  report:
+    if: always()
+    needs:
+      - static
+      - test-candidate
+      - scan-published
+      - publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source-sha }}
+
+      - name: Download candidate reports
+        if: inputs.should-build
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: alpine-s6overlay-candidate-*
+          path: candidate-reports
+          merge-multiple: true
+
+      - name: Download update report
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: alpine-s6overlay-update-report
+          path: update-reports
+
+      - name: Download publication records
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: alpine-s6overlay-publication
+          path: publication-records
+
+      - name: Write grouped build report
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          CANDIDATE_RESULT: ${{ needs.test-candidate.result }}
+          PUBLISHED_SCAN_RESULT: ${{ needs.scan-published.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          SHOULD_BUILD: ${{ inputs.should-build }}
+          SHOULD_PUBLISH: ${{ inputs.publish }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: |
+          mkdir -p candidate-reports update-reports publication-records
+          status=failed
+          if [[ "$SHOULD_BUILD" == "true" && "$CANDIDATE_RESULT" == "success" ]]; then
+            if [[ "$SHOULD_PUBLISH" == "true" ]]; then
+              if [[ "$PUBLISH_RESULT" == "success" ]]; then
+                status=published
+              fi
+            else
+              status=built
+            fi
+          elif [[ "$SHOULD_BUILD" != "true" && "$PUBLISHED_SCAN_RESULT" == "success" ]]; then
+            status=built
+          fi
+          args=(--repository "$GITHUB_REPOSITORY" --kind build --status "$status" --source-sha "$SOURCE_SHA"
+            --outcome "static=$STATIC_RESULT" --outcome "candidates=$CANDIDATE_RESULT"
+            --outcome "published-scan=$PUBLISHED_SCAN_RESULT" --outcome "publish=$PUBLISH_RESULT"
+            --source-root . --output build-report.json --summary "$GITHUB_STEP_SUMMARY")
+          while IFS= read -r report; do
+            args+=(--image-report "$report")
+          done < <(find candidate-reports update-reports -type f -name '*.json' -print 2>/dev/null | sort)
+          while IFS= read -r published; do
+            args+=(--published "$published")
+          done < <(find publication-records -type f -name 'published-*.txt' -exec cat {} + 2>/dev/null | sort -u)
+          while IFS='=' read -r key value; do
+            [[ -n "$key" ]] && args+=(--outcome "publication-${key}=${value:-unknown}")
+          done < <(find publication-records -type f -name 'publication-outcomes.txt' -exec cat {} + 2>/dev/null)
+          python3 scripts/build_report.py aggregate "${args[@]}"
+
+      - name: Upload grouped build report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: alpine-s6overlay-build-report-${{ inputs.source-sha }}
+          path: build-report.json
+          if-no-files-found: error
+
+      - name: Verify required jobs
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          CANDIDATE_RESULT: ${{ needs.test-candidate.result }}
+          PUBLISHED_SCAN_RESULT: ${{ needs.scan-published.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          SHOULD_BUILD: ${{ inputs.should-build }}
+          SHOULD_PUBLISH: ${{ inputs.publish }}
+          SCAN_PUBLISHED: ${{ inputs.scan-published }}
+        run: |
+          [[ "$STATIC_RESULT" == "success" ]]
+          if [[ "$SHOULD_BUILD" == "true" ]]; then
+            [[ "$CANDIDATE_RESULT" == "success" ]]
+            if [[ "$SHOULD_PUBLISH" == "true" ]]; then
+              [[ "$PUBLISH_RESULT" == "success" ]]
+            fi
+          else
+            [[ "$SCAN_PUBLISHED" == "true" ]]
+            [[ "$PUBLISHED_SCAN_RESULT" == "success" ]]
+          fi

@@ -23,15 +23,14 @@
   },
   "packageRules": [
     {
-      "description": "Keep the two Alpine stages together",
+      "description": "The image updater owns the Alpine release tag and digest together with package locks",
       "matchDatasources": [
         "docker"
       ],
       "matchPackageNames": [
         "alpine"
       ],
-      "groupName": "alpine base image",
-      "pinDigests": true
+      "enabled": false
     },
     {
       "description": "Group GitHub Actions patch updates",

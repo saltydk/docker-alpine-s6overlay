@@ -10,92 +10,62 @@ on:
   schedule:
     - cron: '22 12 * * *'
   workflow_dispatch:
+    inputs:
+      refresh-packages:
+        description: Resolve and commit current Alpine package locks before building
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  security-events: write
 
 concurrency:
   group: alpine-s6overlay-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  IMAGE: saltydk/alpine-s6overlay
-  # renovate: datasource=github-releases depName=aquasecurity/trivy
-  TRIVY_VERSION: v0.74.0
-
 jobs:
-  static:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Run package-check tests
-        run: python3 -m unittest discover -s tests -v
-
-      - name: Check shell scripts
-        run: |
-          shellcheck -s sh root/etc/cont-init.d/10-adduser
-          shellcheck scripts/test-image.sh
-
-      - name: Check workflows
-        uses: docker://rhysd/actionlint:1.7.12
-
-      - name: Prime Trivy binary cache
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
-
-  prepare:
+  source:
+    if: >-
+      github.event_name != 'schedule' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.refresh-packages)
     runs-on: ubuntu-latest
     outputs:
-      should-build: ${{ steps.decision.outputs.should-build }}
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      should-build: 'true'
+      scan-published: 'false'
+      publish: ${{ steps.source.outputs.publish }}
     steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Set up QEMU
-        if: github.event_name == 'schedule'
-        uses: docker/setup-qemu-action@v4.3.0
-
-      - name: Check published APK packages
-        id: apk-updates
-        if: github.event_name == 'schedule'
-        run: python3 scripts/check_apk_updates.py --github-output "$GITHUB_OUTPUT"
-
-      - name: Select workflow path
-        id: decision
+      - name: Select event source
+        id: source
         env:
           EVENT_NAME: ${{ github.event_name }}
-          APK_REFRESH: ${{ steps.apk-updates.outputs.needs-refresh }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if [[ "$EVENT_NAME" == "schedule" ]]; then
-            echo "should-build=${APK_REFRESH:-false}" >> "$GITHUB_OUTPUT"
+          echo "source-sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           else
-            echo "should-build=true" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-  test-candidate:
-    needs:
-      - static
-      - prepare
-    if: needs.prepare.outputs.should-build == 'true'
+  update-source:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.refresh-packages)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            slug: amd64
-            architecture: x86_64
-          - platform: linux/arm64
-            slug: arm64
-            architecture: aarch64
-          - platform: linux/arm/v7
-            slug: arm-v7
-            architecture: armv7l
+    permissions:
+      contents: write
+    outputs:
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      should-build: ${{ steps.update.outputs.should-build }}
+      scan-published: ${{ steps.source.outputs.scan-published }}
+      publish: 'true'
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          ref: master
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4.3.0
@@ -103,308 +73,72 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.3.0
 
-      - name: Build candidate
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          load: true
-          platforms: ${{ matrix.platform }}
-          pull: true
-          no-cache-filters: runtime
-          tags: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
-          cache-from: type=gha,scope=base-${{ matrix.slug }}
-          cache-to: type=gha,scope=base-${{ matrix.slug }},mode=max
+      - name: Resolve image inputs
+        id: update
+        run: >-
+          python3 scripts/manage_inputs.py update --write
+          --github-output "$GITHUB_OUTPUT"
+          --report update-report.json
+          --summary "$GITHUB_STEP_SUMMARY"
 
-      - name: Test candidate
-        run: scripts/test-image.sh "local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}" "${{ matrix.platform }}" "${{ matrix.architecture }}"
+      - name: Verify resolved inputs
+        run: python3 scripts/manage_inputs.py verify
 
-      - name: Set up Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
-
-      - name: Generate vulnerability report
+      - name: Commit image inputs
+        if: steps.update.outputs.changed == 'true'
         run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
-            "local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add Dockerfile packages/builder/*.lock packages/runtime/*.lock
+          git diff --cached --check
+          {
+            echo 'build(packages): refresh alpine package locks'
+            echo
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.build_report import render_markdown
+          print(render_markdown(json.loads(Path('update-report.json').read_text())))
+          PY
+          } > "$RUNNER_TEMP/commit-message"
+          git commit --cleanup=verbatim --file "$RUNNER_TEMP/commit-message"
+          git push origin HEAD:master
 
-      - name: Enforce vulnerability policy
+      - name: Select committed source
+        id: source
+        env:
+          SHOULD_BUILD: ${{ steps.update.outputs.should-build }}
         run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed --exit-code 1 \
-            "local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}"
+          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$SHOULD_BUILD" == "true" ]]; then
+            echo "scan-published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "scan-published=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Upload vulnerability report
-        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: trivy-${{ matrix.slug }}.sarif
-
-      - name: Generate Docker Scout vulnerability report
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          sarif-file: scout-${{ matrix.slug }}.sarif
-          write-comment: false
-
-      - name: Upload Docker Scout vulnerability report
-        if: always() && github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: scout-alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: scout-${{ matrix.slug }}.sarif
-
-      - name: Enforce actionable Docker Scout findings
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-fixed: true
-          only-severities: critical,high
-          exit-code: true
-          summary: false
-          write-comment: false
-
-      - name: Enforce CISA KEV Docker Scout findings
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ github.sha }}
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-cisa-kev: true
-          exit-code: true
-          summary: false
-          write-comment: false
-
-  scan-published:
-    needs:
-      - static
-      - prepare
-    if: github.event_name == 'schedule' && needs.prepare.outputs.should-build != 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            slug: amd64
-            architecture: x86_64
-          - platform: linux/arm64
-            slug: arm64
-            architecture: aarch64
-          - platform: linux/arm/v7
-            slug: arm-v7
-            architecture: armv7l
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.3.0
-
-      - name: Test published image
-        run: scripts/test-image.sh "${IMAGE}:latest" "${{ matrix.platform }}" "${{ matrix.architecture }}"
-
-      - name: Set up Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
-
-      - name: Generate vulnerability report
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --platform "${{ matrix.platform }}" \
-            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
-            "${IMAGE}:latest"
-
-      - name: Enforce vulnerability policy
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --platform "${{ matrix.platform }}" \
-            --ignore-unfixed --exit-code 1 "${IMAGE}:latest"
-
-      - name: Upload vulnerability report
+      - name: Upload update report
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        uses: actions/upload-artifact@v7
         with:
-          category: alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: trivy-${{ matrix.slug }}.sarif
+          name: alpine-s6overlay-update-report
+          path: update-report.json
+          if-no-files-found: error
 
-      - name: Generate Docker Scout vulnerability report
-        if: ${{ !cancelled() }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          sarif-file: scout-${{ matrix.slug }}.sarif
-          write-comment: false
-
-      - name: Upload Docker Scout vulnerability report
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: scout-alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: scout-${{ matrix.slug }}.sarif
-
-      - name: Enforce actionable Docker Scout findings
-        if: ${{ !cancelled() }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-fixed: true
-          only-severities: critical,high
-          exit-code: true
-          summary: false
-          write-comment: false
-
-      - name: Enforce CISA KEV Docker Scout findings
-        if: ${{ !cancelled() }}
-        uses: docker/scout-action@v1.24.0
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-cisa-kev: true
-          exit-code: true
-          summary: false
-          write-comment: false
-
-  publish:
-    needs:
-      - static
-      - prepare
-      - test-candidate
+  build:
     if: >-
       always() &&
-      github.event_name != 'pull_request' &&
-      needs.prepare.outputs.should-build == 'true' &&
-      needs.test-candidate.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.3.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.3.0
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6.2.0
-        with:
-          images: ${{ env.IMAGE }}
-          tags: type=sha,format=long,prefix=sha-
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Publish image
-        id: docker-build
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          pull: true
-          push: true
-          sbom: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
-          cache-from: |
-            type=gha,scope=base-amd64
-            type=gha,scope=base-arm64
-            type=gha,scope=base-arm-v7
-          cache-to: type=gha,scope=base-publish,mode=max
-
-      - name: Verify published SHA tag and SBOM
-        env:
-          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
-        run: |
-          details=$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" --format '{{json .}}')
-          [[ "$(jq -r .manifest.digest <<< "$details")" == "$PUBLISHED_DIGEST" ]]
-          [[ "$(jq -r '[.manifest.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | sort | join(",")' <<< "$details")" == "linux/amd64,linux/arm/v7,linux/arm64" ]]
-
-          image_digests=$(jq -r '.manifest.manifests[] | select(.platform.architecture != "unknown") | .digest' <<< "$details" | sort | paste -sd, -)
-          sbom_subjects=$(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]' <<< "$details" | sort | paste -sd, -)
-          [[ "$sbom_subjects" == "$image_digests" ]]
-
-          for platform in linux/amd64 linux/arm64 linux/arm/v7; do
-            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["org.opencontainers.image.revision"]' <<< "$details")" == "$GITHUB_SHA" ]]
-          done
-
-          while read -r attestation_digest; do
-            attestation=$(docker buildx imagetools inspect "${IMAGE}@${attestation_digest}" --raw)
-            [[ "$(jq -c '[.layers[].annotations["in-toto.io/predicate-type"]] | sort' <<< "$attestation")" == '["https://spdx.dev/Document"]' ]]
-          done < <(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<< "$details")
-
-      - name: Promote verified image to latest
-        env:
-          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
-        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${PUBLISHED_DIGEST}"
-
-      - name: Verify latest alias
-        env:
-          PUBLISHED_DIGEST: ${{ steps.docker-build.outputs.digest }}
-        run: |
-          latest=$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}')
-          [[ "$(jq -r .digest <<< "$latest")" == "$PUBLISHED_DIGEST" ]]
-
-  acceptance:
-    if: always()
+      (needs.source.result == 'success' || needs.update-source.result == 'success')
     needs:
-      - static
-      - prepare
-      - test-candidate
-      - scan-published
-      - publish
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify required jobs
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          STATIC_RESULT: ${{ needs.static.result }}
-          PREPARE_RESULT: ${{ needs.prepare.result }}
-          SHOULD_BUILD: ${{ needs.prepare.outputs.should-build }}
-          TEST_RESULT: ${{ needs.test-candidate.result }}
-          PUBLISHED_SCAN_RESULT: ${{ needs.scan-published.result }}
-          PUBLISH_RESULT: ${{ needs.publish.result }}
-        run: |
-          [[ "$STATIC_RESULT" == "success" ]]
-          [[ "$PREPARE_RESULT" == "success" ]]
-          if [[ "$SHOULD_BUILD" == "true" ]]; then
-            [[ "$TEST_RESULT" == "success" ]]
-            if [[ "$EVENT_NAME" != "pull_request" ]]; then
-              [[ "$PUBLISH_RESULT" == "success" ]]
-            fi
-          else
-            [[ "$EVENT_NAME" == "schedule" ]]
-            [[ "$PUBLISHED_SCAN_RESULT" == "success" ]]
-          fi
+      - source
+      - update-source
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/build.yml
+    with:
+      source-sha: ${{ needs.update-source.outputs.source-sha || needs.source.outputs.source-sha }}
+      should-build: ${{ (needs.update-source.outputs.should-build || needs.source.outputs.should-build) == 'true' }}
+      scan-published: ${{ (needs.update-source.outputs.scan-published || needs.source.outputs.scan-published) == 'true' }}
+      publish: ${{ (needs.update-source.outputs.publish || needs.source.outputs.publish) == 'true' }}
+      event-name: ${{ github.event_name }}
+    secrets: inherit

@@ -1,0 +1,16 @@
+# Packages provided by the shared runtime image.
+bash
+ca-certificates
+coreutils
+curl
+findutils
+grep
+jq
+p7zip
+python3
+sed
+shadow
+tzdata
+unzip
+wget
+xz
