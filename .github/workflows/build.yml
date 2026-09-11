@@ -621,8 +621,8 @@ jobs:
             else
               status=built
             fi
-          elif [[ "$SHOULD_BUILD" != "true" && "$PUBLISHED_SCAN_RESULT" == "success" ]]; then
-            status=built
+          elif [[ "$SHOULD_BUILD" == "false" && "$STATIC_RESULT" == "success" && "$PUBLISHED_SCAN_RESULT" == "success" ]]; then
+            status=no-build-required
           fi
           args=(--repository "$GITHUB_REPOSITORY" --kind build --status "$status" --source-sha "$SOURCE_SHA"
             --outcome "static=$STATIC_RESULT" --outcome "candidates=$CANDIDATE_RESULT"
