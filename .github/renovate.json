@@ -70,6 +70,16 @@
         "custom.rarlab"
       ],
       "extractVersion": "(?:^|/)unrarsrc-(?<version>\\d+\\.\\d+\\.\\d+)\\.tar\\.gz$"
+    },
+    {
+      "description": "Keep one published Scout action tag for both the action and authenticated binary preparation",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "docker/scout-action"
+      ],
+      "pinDigests": false
     }
   ],
   "customDatasources": {

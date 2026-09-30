@@ -73,3 +73,11 @@ script. CI computes these values and passes them as `APK_LOCKS_SHA256` and
 `IMAGE_INPUTS_SHA256` build arguments. During each build, both stages install
 the complete exact lock and verify their resulting package inventories before
 the image can be published.
+
+Scout runs through `.github/actions/scout`. The wrapper authenticates its release
+download with the job's GitHub token, verifies the published checksum, and then
+uses the existing upstream action. The wrapper's `uses: docker/scout-action@...`
+reference is the only version pin; Renovate updates it and the binary download
+follows automatically. Preparation selects the runner architecture and retries
+temporary download failures. Missing tools or reports skip dependent steps while
+the failed security job continues to block publication.
