@@ -1,0 +1,26 @@
+name: Request base image refresh
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+# Serialize admission across every consumer. The separate ci concurrency group
+# keeps the long-running base builds serialized without blocking this check.
+concurrency:
+  group: alpine-s6overlay-refresh-requests
+  cancel-in-progress: false
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+      - name: Request or reuse a base package refresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/request_refresh.py
