@@ -190,7 +190,8 @@ resolve() {
             resolver_error=$temporary_file
             if ! add_from_files "$inherited_inventory" "$inherited_requests" > "$resolver_error" 2>&1; then
                 resolver_detail=$(tr '\n' ' ' < "$resolver_error" | sed 's/[[:space:]]*$//')
-                if grep -Eqi 'temporary error|unable to fetch|network|connection|timed out|timeout|tls|certificate|unauthorized|authentication|permission denied|(^|[^0-9])(401|403)([^0-9]|$)' "$resolver_error"; then
+                # Package names such as ca-certificates are not transport errors.
+                if grep -Eqi '(^|[^[:alnum:]_.+-])(temporary error|unable to fetch|network|connection|timed out|timeout|tls|certificates?|unauthorized|authentication|permission denied|401|403)([^[:alnum:]_.+-]|$)' "$resolver_error"; then
                     printf 'apk-lock: failed to resolve inherited packages: %s\n' \
                         "$resolver_detail" >&2
                 elif grep -Eqi 'breaks:|conflicts:' "$resolver_error" &&

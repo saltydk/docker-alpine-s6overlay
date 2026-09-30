@@ -183,6 +183,28 @@ class ApkLockHelperTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("inherited package constraints conflict", result.stderr)
 
+    def test_inherited_resolve_ignores_transport_words_in_package_names_and_versions(self) -> None:
+        requests = self.directory / "requested.txt"
+        requests.write_text("openssl\n", encoding="utf-8")
+        self.inventory.write_text("libcrypto3 3.5.8-r0\n", encoding="utf-8")
+        for package in (
+            "ca-certificates-20260909-r0", "libtls-1.0-r0", "network-tools-1-r0",
+            "connection-tracker-1-r0", "timeout-1-r0", "example-401-r0", "example-403-r0",
+        ):
+            with self.subTest(package=package):
+                self.environment["FAKE_ADD_ERROR"] = (
+                    "ERROR: unable to select packages:\n"
+                    "  libcrypto3-3.5.8-r0:\n"
+                    "    breaks: openssl-3.5.9-r0[libcrypto3=3.5.9-r0]\n"
+                    "    satisfies: world[libcrypto3=3.5.8-r0]\n"
+                    f"               {package}[so:libcrypto.so.3]\n"
+                )
+
+                result = self.run_helper("resolve", str(requests), "inherited")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("inherited package constraints conflict", result.stderr)
+
     def test_inherited_resolve_does_not_treat_an_unavailable_package_as_a_parent_conflict(self) -> None:
         self.environment["FAKE_ADD_ERROR"] = "unable to select packages: requested package is unavailable"
         requests = self.directory / "requested.txt"
@@ -210,17 +232,26 @@ class ApkLockHelperTests(unittest.TestCase):
         self.assertNotIn("constraints conflict", result.stderr)
 
     def test_inherited_resolve_does_not_misclassify_transport_failures(self) -> None:
-        self.environment["FAKE_ADD_ERROR"] = "network unavailable"
         requests = self.directory / "requested.txt"
         requests.write_text("jq\n", encoding="utf-8")
         self.inventory.write_text("musl 1.2.5-r21\n", encoding="utf-8")
         self.after.write_text("", encoding="utf-8")
+        for error in (
+            "network unavailable", "ERROR: TLS handshake failed",
+            "ERROR: SSL: certificate verify failed", "ERROR: HTTP 401 Unauthorized",
+            "ERROR: HTTP 403 Forbidden", "WARNING: fetching index: temporary error (try again later)",
+        ):
+            with self.subTest(error=error):
+                self.environment["FAKE_ADD_ERROR"] = (
+                    error + "\nunable to select packages:\n"
+                    "  musl-1.2.5-r22:\n    breaks: world[musl=1.2.5-r21]\n"
+                )
 
-        result = self.run_helper("resolve", str(requests), "inherited")
+                result = self.run_helper("resolve", str(requests), "inherited")
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("failed to resolve inherited packages", result.stderr)
-        self.assertNotIn("constraints conflict", result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("failed to resolve inherited packages", result.stderr)
+                self.assertNotIn("constraints conflict", result.stderr)
 
     def test_resolve_rejects_a_partially_valid_request_list_before_apk(self) -> None:
         requests = self.directory / "requested.txt"
