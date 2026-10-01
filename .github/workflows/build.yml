@@ -205,7 +205,7 @@ jobs:
       - name: Scan candidate with shared container tooling
         id: security
         if: ${{ !cancelled() }}
-        uses: saltyorg/github-actions/container-scan@v1.3.1
+        uses: saltyorg/github-actions/container-scan@v1.3.2
         with:
           image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
           name: alpine-s6overlay
