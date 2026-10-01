@@ -40,31 +40,16 @@ itself is an explicit Dockerfile change; automatic updates retain the selected
 major/minor tag.
 
 Package refresh runs every six hours. A manual `ci` run with `refresh-packages`
-enabled uses the same path, including requests from downstream repositories
-whose added packages need newer inherited libraries. Refreshes resolve and
-commit all six locks before building and publishing the selected source.
-The workflow's concurrency group serializes these runs.
+enabled resolves and commits all six locks before building and publishing the
+selected source. The workflow's concurrency group serializes these runs. The
+updater skips rebuilding when resolved inputs already match the published image.
 
-Downstream repositories request a refresh through `request-refresh.yml`:
-
-```shell
-gh workflow run request-refresh.yml --repo saltydk/docker-alpine-s6overlay --ref master
-```
-
-This is the common request endpoint for qBittorrent, Autoscan, and additional
-consumers. It serializes request handling, looks for scheduled or manual package
-refreshes that are already queued or running, and reuses them. Otherwise it
-dispatches `ci.yml` with `refresh-packages=true`. Ordinary push builds do not
-satisfy a package-refresh request. The base updater also skips rebuilding when
-its resolved inputs already match the published image.
-
-Consumers need a token with Actions write permission in this repository to
-submit the request. The coordinator uses this repository's `GITHUB_TOKEN` for
-its own API calls. Request acceptance does not mean publication succeeded;
-lookup and dispatch failures appear in the coordinator run, and build failures
-remain in the base CI run. Consumers keep their published images and retry on
-their own update schedules. Both current consumers check every six hours and
-offer a `refresh-base` input on their manual update workflows.
+qBittorrent and Autoscan check the published base every six hours and adopt its
+verified digest when needed. qBittorrent reports `waiting-for-base` when inherited
+package pins prevent resolution, preserves its inputs and published images, and
+retries on a later version check. To accelerate that process, run this repository's
+manual package refresh, wait for successful publication, then run the consumer's
+update workflow.
 
 ## Build
 
