@@ -74,10 +74,13 @@ script. CI computes these values and passes them as `APK_LOCKS_SHA256` and
 the complete exact lock and verify their resulting package inventories before
 the image can be published.
 
-Scout runs through `.github/actions/scout`. The wrapper authenticates its release
-download with the job's GitHub token, verifies the published checksum, and then
-uses the existing upstream action. The wrapper's `uses: docker/scout-action@...`
-reference is the only version pin; Renovate updates it and the binary download
-follows automatically. Preparation selects the runner architecture and retries
-temporary download failures. Missing tools or reports skip dependent steps while
-the failed security job continues to block publication.
+Container security uses the released `saltyorg/github-actions` scan, snapshot,
+and reporting actions. Ordinary CVEs appear in retained scanner reports and
+tracked GitHub issues. CISA KEV findings remain blocking. Candidate runtime tests,
+package inventory checks, and the automated upgrade paths remain required.
+
+Published-image scans run on unchanged-input refreshes and after successful
+publication. A complete current scan can resolve an automation-owned CVE issue;
+missing reports or scanner errors preserve existing issues. Publication and
+issue reconciliation share a queued concurrency group. Reporting failures remain
+visible and cannot prevent an already accepted candidate from publishing.

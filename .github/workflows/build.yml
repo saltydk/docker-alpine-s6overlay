@@ -34,8 +34,6 @@ permissions:
 
 env:
   IMAGE: saltydk/alpine-s6overlay
-  # renovate: datasource=github-releases depName=aquasecurity/trivy
-  TRIVY_VERSION: v0.74.0
 
 jobs:
   static:
@@ -68,12 +66,9 @@ jobs:
 
       - name: Check workflows
         uses: docker://rhysd/actionlint:1.7.12
-
-      - name: Prime Trivy binary cache
-        uses: aquasecurity/setup-trivy@v0.3.1
         with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
+          args: '-ignore "unexpected key .queue. for .concurrency. section"'
+
 
   test-candidate:
     needs: static
@@ -207,193 +202,44 @@ jobs:
           path: '*-${{ matrix.slug }}-report.json'
           if-no-files-found: error
 
-      - name: Set up Trivy
-        id: trivy-setup
+      - name: Scan candidate with shared container tooling
+        id: security
         if: ${{ !cancelled() }}
-        uses: aquasecurity/setup-trivy@v0.3.1
+        uses: saltyorg/github-actions/container-scan@v1.3.1
         with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
-
-      - name: Generate vulnerability report
-        id: trivy-report
-        if: ${{ !cancelled() && steps.trivy-setup.outcome == 'success' }}
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
-            "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
-
-      - name: Enforce vulnerability policy
-        if: ${{ !cancelled() && steps.trivy-setup.outcome == 'success' }}
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed --exit-code 1 \
-            "local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}"
-
-      - name: Upload vulnerability report
-        if: ${{ !cancelled() && steps.trivy-report.outcome == 'success' && (inputs.event-name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: trivy-${{ matrix.slug }}.sarif
-
-      - name: Generate Docker Scout vulnerability report
-        id: scout-report
-        if: ${{ !cancelled() && inputs.event-name != 'pull_request' }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
           image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
+          name: alpine-s6overlay
           platform: ${{ matrix.platform }}
+          output-directory: security/${{ matrix.slug }}
+          scout-enabled: ${{ inputs.event-name != 'pull_request' }}
+          enforce-kev: ${{ inputs.event-name != 'pull_request' }}
           dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          sarif-file: scout-${{ matrix.slug }}.sarif
-          write-comment: false
 
-      - name: Upload Docker Scout vulnerability report
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Retain candidate security reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
-          category: scout-alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: scout-${{ matrix.slug }}.sarif
-
-      - name: Enforce actionable Docker Scout findings
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
-          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-fixed: true
-          only-severities: critical,high
-          exit-code: true
-          summary: false
-          write-comment: false
-
-      - name: Enforce CISA KEV Docker Scout findings
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
-          image: local/alpine-s6overlay:${{ matrix.slug }}-${{ inputs.source-sha }}
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-cisa-kev: true
-          exit-code: true
-          summary: false
-          write-comment: false
+          name: docker-alpine-s6overlay-security-candidate-alpine-s6overlay-${{ matrix.slug }}
+          path: security/${{ matrix.slug }}
+          if-no-files-found: warn
 
   scan-published:
-    needs: static
-    if: inputs.scan-published
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            slug: amd64
-            architecture: x86_64
-          - platform: linux/arm64
-            slug: arm64
-            architecture: aarch64
-          - platform: linux/arm/v7
-            slug: arm-v7
-            architecture: armv7l
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.source-sha }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.3.0
-
-      - name: Test published image
-        run: scripts/test-image.sh "${IMAGE}:latest" "${{ matrix.platform }}" "${{ matrix.architecture }}"
-
-      - name: Set up Trivy
-        id: trivy-setup
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          cache: true
-          version: ${{ env.TRIVY_VERSION }}
-
-      - name: Generate vulnerability report
-        id: trivy-report
-        if: ${{ !cancelled() && steps.trivy-setup.outcome == 'success' }}
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --platform "${{ matrix.platform }}" \
-            --format sarif --output "trivy-${{ matrix.slug }}.sarif" \
-            "${IMAGE}:latest"
-
-      - name: Enforce vulnerability policy
-        if: ${{ !cancelled() && steps.trivy-setup.outcome == 'success' }}
-        run: |
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --platform "${{ matrix.platform }}" \
-            --ignore-unfixed --exit-code 1 "${IMAGE}:latest"
-
-      - name: Upload vulnerability report
-        if: ${{ !cancelled() && steps.trivy-report.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: trivy-${{ matrix.slug }}.sarif
-
-      - name: Generate Docker Scout vulnerability report
-        id: scout-report
-        if: ${{ !cancelled() }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          sarif-file: scout-${{ matrix.slug }}.sarif
-          write-comment: false
-
-      - name: Upload Docker Scout vulnerability report
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          category: scout-alpine-s6overlay-${{ matrix.slug }}
-          sarif_file: scout-${{ matrix.slug }}.sarif
-
-      - name: Enforce actionable Docker Scout findings
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-fixed: true
-          only-severities: critical,high
-          exit-code: true
-          summary: false
-          write-comment: false
-
-      - name: Enforce CISA KEV Docker Scout findings
-        if: ${{ !cancelled() && steps.scout-report.outcome == 'success' }}
-        uses: ./.github/actions/scout
-        with:
-          command: cves
-          image: registry://${{ env.IMAGE }}:latest
-          platform: ${{ matrix.platform }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          only-cisa-kev: true
-          exit-code: true
-          summary: false
-          write-comment: false
+    needs: [static, publish]
+    if: ${{ !cancelled() && (inputs.scan-published || needs.publish.result == 'success') }}
+    permissions:
+      contents: read
+      security-events: write
+      issues: write
+    uses: ./.github/workflows/security-scan.yml
+    secrets: inherit
 
   publish:
+    concurrency:
+      group: docker-alpine-s6overlay-publication
+      queue: max
+      cancel-in-progress: false
     needs:
       - static
       - test-candidate

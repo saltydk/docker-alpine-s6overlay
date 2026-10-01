@@ -1,0 +1,108 @@
+name: Published image security
+
+on:
+  workflow_call:
+    inputs:
+      artifact-prefix:
+        description: Unique artifact prefix for this invocation
+        type: string
+        default: published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: docker-alpine-s6overlay-publication
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.snapshot.outputs.matrix }}
+    steps:
+      - uses: docker/setup-buildx-action@v4.3.0
+      - id: snapshot
+        uses: saltyorg/github-actions/container-snapshot@v1.3.1
+        with:
+          targets: '[{"name":"latest","platform":"linux/amd64","image":"saltydk/alpine-s6overlay:latest"},{"name":"latest","platform":"linux/arm64","image":"saltydk/alpine-s6overlay:latest"},{"name":"latest","platform":"linux/arm/v7","image":"saltydk/alpine-s6overlay:latest"}]'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: docker-alpine-s6overlay-security-${{ inputs.artifact-prefix || 'published' }}-snapshot
+          path: ${{ steps.snapshot.outputs.expected-targets }}
+          if-no-files-found: error
+
+  scan:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-qemu-action@v4.3.0
+      - name: Test published runtime
+        run: scripts/test-image.sh "${{ matrix.image }}" "${{ matrix.platform }}" "${{ matrix.architecture }}"
+      - name: Scan published image
+        if: ${{ !cancelled() }}
+        uses: saltyorg/github-actions/container-scan@v1.3.1
+        with:
+          image: ${{ matrix.image }}
+          name: ${{ matrix.name }}
+          platform: ${{ matrix.platform }}
+          kind: published
+          output-directory: security/${{ matrix.name }}-${{ matrix.slug }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Upload published Scout report to Code Scanning
+        if: ${{ !cancelled() && hashFiles(format('security/{0}-{1}/scout.sarif', matrix.name, matrix.slug)) != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          category: scout-docker-alpine-s6overlay-${{ matrix.name }}-${{ matrix.slug }}
+          sarif_file: security/${{ matrix.name }}-${{ matrix.slug }}/scout.sarif
+      - name: Retain complete or incomplete scan evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-alpine-s6overlay-security-${{ inputs.artifact-prefix || 'published' }}-published-${{ matrix.name }}-${{ matrix.slug }}
+          path: security/${{ matrix.name }}-${{ matrix.slug }}
+          if-no-files-found: warn
+
+  report:
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    needs: [prepare, scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      security-events: write
+    steps:
+      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-alpine-s6overlay-security-${{ inputs.artifact-prefix || 'published' }}-snapshot
+          path: snapshot
+      - name: Download per-target reports
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: docker-alpine-s6overlay-security-${{ inputs.artifact-prefix || 'published' }}-published-*
+          path: security-reports
+          merge-multiple: false
+      - name: Report current published vulnerabilities
+        uses: saltyorg/github-actions/container-report@v1.3.1
+        with:
+          reports-directory: security-reports
+          expected-targets: snapshot/expected-targets.json
+          scope: published-images
+          dry-run: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Retain aggregate reporting outcomes
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-alpine-s6overlay-security-${{ inputs.artifact-prefix || 'published' }}-report
+          path: container-security-report.json
+          if-no-files-found: warn

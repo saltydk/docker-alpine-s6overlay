@@ -135,6 +135,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      issues: write
     uses: ./.github/workflows/build.yml
     with:
       source-sha: ${{ needs.update-source.outputs.source-sha || needs.source.outputs.source-sha }}

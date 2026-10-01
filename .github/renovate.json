@@ -72,12 +72,12 @@
       "extractVersion": "(?:^|/)unrarsrc-(?<version>\\d+\\.\\d+\\.\\d+)\\.tar\\.gz$"
     },
     {
-      "description": "Keep one published Scout action tag for both the action and authenticated binary preparation",
+      "description": "Use published tags for shared container security actions",
       "matchManagers": [
         "github-actions"
       ],
       "matchPackageNames": [
-        "docker/scout-action"
+        "saltyorg/github-actions"
       ],
       "pinDigests": false
     }
@@ -99,17 +99,6 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?(?: versioning=(?<versioning>\\S+))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)"
       ],
       "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}"
-    },
-    {
-      "customType": "regex",
-      "description": "Pinned Trivy scanner version",
-      "managerFilePatterns": [
-        "/(^|/)\\.github/workflows/.+\\.ya?ml$/"
-      ],
-      "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+TRIVY_VERSION:\\s+(?<currentValue>\\S+)"
-      ],
-      "versioningTemplate": "semver-coerced"
     }
   ]
 }
