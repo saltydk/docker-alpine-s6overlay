@@ -233,6 +233,8 @@ jobs:
       security-events: write
       issues: write
     uses: ./.github/workflows/security-scan.yml
+    with:
+      source-sha: ${{ inputs.source-sha }}
     secrets: inherit
 
   publish:
