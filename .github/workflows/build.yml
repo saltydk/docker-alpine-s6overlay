@@ -450,7 +450,7 @@ jobs:
           path: update-reports
 
       - name: Download publication records
-        if: always()
+        if: ${{ always() && needs.publish.result != 'skipped' }}
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
