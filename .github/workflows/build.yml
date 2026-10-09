@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       input-sha: ${{ steps.inputs.outputs.input-sha }}
-      locks-sha: ${{ steps.inputs.outputs.locks-sha }}
+      locks-sha: ${{ steps.inputs.outputs.locks-sha256 }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -51,18 +51,13 @@ jobs:
 
       - name: Verify committed image inputs
         id: inputs
-        run: |
-          python3 scripts/manage_inputs.py verify --github-output "$GITHUB_OUTPUT"
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          from pathlib import Path
-          from scripts.package_locks import locks_digest
-          print(f"locks-sha={locks_digest(Path('.'))}")
-          PY
+        run: python3 scripts/manage_inputs.py verify --github-output "$GITHUB_OUTPUT"
+
+      - name: Check service script
+        run: shellcheck -s sh root/etc/cont-init.d/10-adduser
 
       - name: Check shell scripts
-        run: |
-          shellcheck -s sh root/etc/cont-init.d/10-adduser
-          shellcheck scripts/apk-lock.sh scripts/test-image.sh
+        run: shellcheck scripts/apk-lock.sh scripts/test-image.sh
 
       - name: Check workflows
         uses: docker://rhysd/actionlint:1.7.12
@@ -227,7 +222,7 @@ jobs:
 
   scan-published:
     needs: [static, publish]
-    if: ${{ !cancelled() && (inputs.scan-published || needs.publish.result == 'success') }}
+    if: ${{ !cancelled() && (inputs.scan-published || (needs.publish.result == 'success' && needs.publish.outputs.latest-promoted == 'true')) }}
     permissions:
       contents: read
       security-events: write
@@ -254,9 +249,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       published-digest: ${{ steps.effective.outputs.digest }}
+      latest-promoted: ${{ steps.promote.outcome == 'success' && steps.verify-latest.outcome == 'success' && steps.record-latest.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          fetch-depth: 0
           ref: ${{ inputs.source-sha }}
 
       - name: Set up QEMU
@@ -285,31 +282,16 @@ jobs:
         id: existing
         env:
           SOURCE_SHA: ${{ inputs.source-sha }}
-        run: |
-          python3 scripts/build_report.py snapshot \
-            --repository "$GITHUB_REPOSITORY" \
-            --image alpine-s6overlay \
-            --platform linux/amd64 \
-            --stage runtime \
-            --reference "${IMAGE}:sha-${SOURCE_SHA}" \
-            --source-sha "$SOURCE_SHA" \
-            --output exact-sha-tag.json
-          baseline_status=$(jq -r '.images[0].baseline.status' exact-sha-tag.json)
-          case "$baseline_status" in
-            absent)
-              echo 'exists=false' >> "$GITHUB_OUTPUT"
-              ;;
-            available)
-              digest=$(jq -r '.images[0].baseline.digest' exact-sha-tag.json)
-              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-              echo 'exists=true' >> "$GITHUB_OUTPUT"
-              echo "digest=$digest" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "SHA tag inspection returned unexpected baseline status: $baseline_status" >&2
-              exit 1
-              ;;
-          esac
+        run: >-
+          python3 scripts/publication.py inspect-sha
+          --repository "$GITHUB_REPOSITORY"
+          --image-name alpine-s6overlay
+          --platform linux/amd64
+          --stage runtime
+          --reference "${IMAGE}:sha-${SOURCE_SHA}"
+          --source-sha "$SOURCE_SHA"
+          --output exact-sha-tag.json
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Publish image
         id: docker-build
@@ -338,17 +320,22 @@ jobs:
         env:
           BUILT_DIGEST: ${{ steps.docker-build.outputs.digest }}
           EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
-        run: |
-          digest=${EXISTING_DIGEST:-$BUILT_DIGEST}
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        run: >-
+          python3 scripts/publication.py digest
+          --built-digest "$BUILT_DIGEST"
+          --existing-digest "$EXISTING_DIGEST"
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Record immutable SHA publication
         id: record-sha
         env:
           PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
           SOURCE_SHA: ${{ inputs.source-sha }}
-        run: echo "${IMAGE}:sha-${SOURCE_SHA}@${PUBLISHED_DIGEST}" > published-sha.txt
+        run: >-
+          python3 scripts/publication.py record
+          --reference "${IMAGE}:sha-${SOURCE_SHA}"
+          --digest "$PUBLISHED_DIGEST"
+          --output published-sha.txt
 
       - name: Verify published SHA tag and SBOM
         id: verify-sha
@@ -357,56 +344,73 @@ jobs:
           LOCKS_SHA: ${{ needs.static.outputs.locks-sha }}
           PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
           SOURCE_SHA: ${{ inputs.source-sha }}
-        run: |
-          details=$(docker buildx imagetools inspect "${IMAGE}:sha-${SOURCE_SHA}" --format '{{json .}}')
-          [[ "$(jq -r .manifest.digest <<< "$details")" == "$PUBLISHED_DIGEST" ]]
-          [[ "$(jq -r '[.manifest.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | sort | join(",")' <<< "$details")" == "linux/amd64,linux/arm/v7,linux/arm64" ]]
-          image_digests=$(jq -r '.manifest.manifests[] | select(.platform.architecture != "unknown") | .digest' <<< "$details" | sort | paste -sd, -)
-          sbom_subjects=$(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]' <<< "$details" | sort | paste -sd, -)
-          [[ "$sbom_subjects" == "$image_digests" ]]
-          for platform in linux/amd64 linux/arm64 linux/arm/v7; do
-            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["org.opencontainers.image.revision"]' <<< "$details")" == "$SOURCE_SHA" ]]
-            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["io.saltydk.apk-locks.sha256"]' <<< "$details")" == "$LOCKS_SHA" ]]
-            [[ "$(jq -r --arg platform "$platform" '.image[$platform].config.Labels["io.saltydk.image-inputs.sha256"]' <<< "$details")" == "$INPUT_SHA" ]]
-          done
-          while read -r attestation_digest; do
-            attestation=$(docker buildx imagetools inspect "${IMAGE}@${attestation_digest}" --raw)
-            [[ "$(jq -c '[.layers[].annotations["in-toto.io/predicate-type"]] | sort' <<< "$attestation")" == '["https://spdx.dev/Document"]' ]]
-          done < <(jq -r '.manifest.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<< "$details")
+        run: >-
+          python3 scripts/publication.py verify-sha
+          --reference "${IMAGE}:sha-${SOURCE_SHA}"
+          --digest "$PUBLISHED_DIGEST"
+          --source-sha "$SOURCE_SHA"
+          --locks-sha "$LOCKS_SHA"
+          --input-sha "$INPUT_SHA"
+
+      - name: Check latest promotion
+        id: latest
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          DEFAULT_BRANCH: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: >-
+          python3 scripts/check_latest_promotion.py
+          --image "$IMAGE"
+          --source-sha "$SOURCE_SHA"
+          --default-branch "$DEFAULT_BRANCH"
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Promote verified image to latest
         id: promote
+        if: steps.latest.outputs.promote == 'true'
         env:
           PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
-        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${PUBLISHED_DIGEST}"
+        run: >-
+          python3 scripts/publication.py promote
+          --reference "${IMAGE}:latest"
+          --digest "$PUBLISHED_DIGEST"
+          --output promoted-latest.txt
 
       - name: Verify latest alias
         id: verify-latest
+        if: steps.latest.outputs.promote == 'true'
         env:
           PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
-        run: |
-          latest=$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}')
-          [[ "$(jq -r .digest <<< "$latest")" == "$PUBLISHED_DIGEST" ]]
+        run: >-
+          python3 scripts/publication.py verify
+          --reference "${IMAGE}:latest"
+          --digest "$PUBLISHED_DIGEST"
 
       - name: Record verified latest publication
         id: record-latest
+        if: steps.latest.outputs.promote == 'true'
         env:
           PUBLISHED_DIGEST: ${{ steps.effective.outputs.digest }}
-        run: echo "${IMAGE}:latest@${PUBLISHED_DIGEST}" > published-latest.txt
+        run: >-
+          python3 scripts/publication.py record
+          --reference "${IMAGE}:latest"
+          --digest "$PUBLISHED_DIGEST"
+          --output published-latest.txt
 
       - name: Capture publication outcomes
         if: always()
-        run: |
-          {
-            echo "inspect=${{ steps.existing.outcome }}"
-            echo "build=${{ steps.docker-build.outcome }}"
-            echo "digest=${{ steps.effective.outcome }}"
-            echo "record-sha=${{ steps.record-sha.outcome }}"
-            echo "verify-sha=${{ steps.verify-sha.outcome }}"
-            echo "promote=${{ steps.promote.outcome }}"
-            echo "verify-latest=${{ steps.verify-latest.outcome }}"
-            echo "record-latest=${{ steps.record-latest.outcome }}"
-          } > publication-outcomes.txt
+        run: >-
+          python3 scripts/publication.py outcomes
+          --output publication-outcomes.txt
+          --outcome "inspect=${{ steps.existing.outcome }}"
+          --outcome "build=${{ steps.docker-build.outcome }}"
+          --outcome "digest=${{ steps.effective.outcome }}"
+          --outcome "record-sha=${{ steps.record-sha.outcome }}"
+          --outcome "verify-sha=${{ steps.verify-sha.outcome }}"
+          --outcome "latest-check=${{ steps.latest.outcome }}"
+          --outcome "latest-status=${{ steps.latest.outputs.status }}"
+          --outcome "promote=${{ steps.promote.outcome }}"
+          --outcome "verify-latest=${{ steps.verify-latest.outcome }}"
+          --outcome "record-latest=${{ steps.record-latest.outcome }}"
 
       - name: Upload publication records
         if: always()
@@ -416,6 +420,7 @@ jobs:
           path: |
             publication-outcomes.txt
             published-*.txt
+            promoted-*.txt
           if-no-files-found: error
 
   report:
@@ -466,34 +471,22 @@ jobs:
           SHOULD_BUILD: ${{ inputs.should-build }}
           SHOULD_PUBLISH: ${{ inputs.publish }}
           SOURCE_SHA: ${{ inputs.source-sha }}
-        run: |
-          mkdir -p candidate-reports update-reports publication-records
-          status=failed
-          if [[ "$SHOULD_BUILD" == "true" && "$CANDIDATE_RESULT" == "success" ]]; then
-            if [[ "$SHOULD_PUBLISH" == "true" ]]; then
-              if [[ "$PUBLISH_RESULT" == "success" ]]; then
-                status=published
-              fi
-            else
-              status=built
-            fi
-          elif [[ "$SHOULD_BUILD" == "false" && "$STATIC_RESULT" == "success" && "$PUBLISHED_SCAN_RESULT" == "success" ]]; then
-            status=no-build-required
-          fi
-          args=(--repository "$GITHUB_REPOSITORY" --kind build --status "$status" --source-sha "$SOURCE_SHA"
-            --outcome "static=$STATIC_RESULT" --outcome "candidates=$CANDIDATE_RESULT"
-            --outcome "published-scan=$PUBLISHED_SCAN_RESULT" --outcome "publish=$PUBLISH_RESULT"
-            --source-root . --output build-report.json --summary "$GITHUB_STEP_SUMMARY")
-          while IFS= read -r report; do
-            args+=(--image-report "$report")
-          done < <(find candidate-reports update-reports -type f -name '*.json' -print 2>/dev/null | sort)
-          while IFS= read -r published; do
-            args+=(--published "$published")
-          done < <(find publication-records -type f -name 'published-*.txt' -exec cat {} + 2>/dev/null | sort -u)
-          while IFS='=' read -r key value; do
-            [[ -n "$key" ]] && args+=(--outcome "publication-${key}=${value:-unknown}")
-          done < <(find publication-records -type f -name 'publication-outcomes.txt' -exec cat {} + 2>/dev/null)
-          python3 scripts/build_report.py aggregate "${args[@]}"
+        run: >-
+          python3 scripts/build_result.py report
+          --repository "$GITHUB_REPOSITORY"
+          --source-sha "$SOURCE_SHA"
+          --static-result "$STATIC_RESULT"
+          --candidate-result "$CANDIDATE_RESULT"
+          --published-scan-result "$PUBLISHED_SCAN_RESULT"
+          --publish-result "$PUBLISH_RESULT"
+          --should-build "$SHOULD_BUILD"
+          --should-publish "$SHOULD_PUBLISH"
+          --source-root .
+          --candidate-reports candidate-reports
+          --update-reports update-reports
+          --publication-records publication-records
+          --output build-report.json
+          --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Upload grouped build report
         if: always()
@@ -512,14 +505,12 @@ jobs:
           SHOULD_BUILD: ${{ inputs.should-build }}
           SHOULD_PUBLISH: ${{ inputs.publish }}
           SCAN_PUBLISHED: ${{ inputs.scan-published }}
-        run: |
-          [[ "$STATIC_RESULT" == "success" ]]
-          if [[ "$SHOULD_BUILD" == "true" ]]; then
-            [[ "$CANDIDATE_RESULT" == "success" ]]
-            if [[ "$SHOULD_PUBLISH" == "true" ]]; then
-              [[ "$PUBLISH_RESULT" == "success" ]]
-            fi
-          else
-            [[ "$SCAN_PUBLISHED" == "true" ]]
-            [[ "$PUBLISHED_SCAN_RESULT" == "success" ]]
-          fi
+        run: >-
+          python3 scripts/build_result.py require
+          --static-result "$STATIC_RESULT"
+          --candidate-result "$CANDIDATE_RESULT"
+          --published-scan-result "$PUBLISHED_SCAN_RESULT"
+          --publish-result "$PUBLISH_RESULT"
+          --should-build "$SHOULD_BUILD"
+          --should-publish "$SHOULD_PUBLISH"
+          --scan-published "$SCAN_PUBLISHED"
