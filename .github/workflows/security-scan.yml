@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: docker/setup-buildx-action@v4.3.0
       - id: snapshot
-        uses: saltyorg/github-actions/container-snapshot@v1.4.1
+        uses: saltyorg/github-actions/container-snapshot@v1.4.2
         with:
           targets: '[{"name":"latest","platform":"linux/amd64","image":"saltydk/alpine-s6overlay:latest"},{"name":"latest","platform":"linux/arm64","image":"saltydk/alpine-s6overlay:latest"},{"name":"latest","platform":"linux/arm/v7","image":"saltydk/alpine-s6overlay:latest"}]'
       - uses: actions/upload-artifact@v7
@@ -54,7 +54,7 @@ jobs:
         run: scripts/test-image.sh "${{ matrix.image }}" "${{ matrix.platform }}" "${{ matrix.architecture }}"
       - name: Scan published image
         if: ${{ !cancelled() }}
-        uses: saltyorg/github-actions/container-scan@v1.4.1
+        uses: saltyorg/github-actions/container-scan@v1.4.2
         with:
           image: ${{ matrix.image }}
           name: ${{ matrix.name }}
@@ -99,7 +99,7 @@ jobs:
           path: security-reports
           merge-multiple: false
       - name: Report current published vulnerabilities
-        uses: saltyorg/github-actions/container-report@v1.4.1
+        uses: saltyorg/github-actions/container-report@v1.4.2
         with:
           reports-directory: security-reports
           expected-targets: snapshot/expected-targets.json
