@@ -5,7 +5,7 @@
 alpine-baselayout=3.7.2-r1
 alpine-baselayout-data=3.7.2-r1
 alpine-keys=2.6-r0
-alpine-release=3.24.3-r0
+alpine-release=3.24.4-r0
 apk-tools=3.0.9-r0
 binutils=2.45.1-r1
 build-base=0.5-r4
