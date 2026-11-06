@@ -1,6 +1,6 @@
 # apk-lock: 1
 # architecture: aarch64
-# parent: alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+# parent: alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 # requests-sha256: ab5c15ccd489126b9efabf0e22d9b38aa7fa46f82783ed310fd200dfdf36eac8
 alpine-baselayout=3.7.2-r1
 alpine-baselayout-data=3.7.2-r1
