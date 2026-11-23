@@ -32,9 +32,18 @@ class ApkLockHelperTests(unittest.TestCase):
                 cat "$FAKE_INVENTORY"
                 ;;
               version)
+                if [ "$2" = -t ]; then
+                  printf '%s\\n' "${FAKE_VERSION_COMPARISON:-=}"
+                  exit 0
+                fi
                 case "$3" in
                   *[!A-Za-z0-9+_.:~-]*|'') printf '%s\\n' "$3"; exit 1 ;;
                 esac
+                ;;
+              search)
+                printf '%s\\n' "$*" >> "$FAKE_LOG"
+                [ -n "${FAKE_SEARCH:-}" ] || exit 1
+                printf '%s\\n' "$FAKE_SEARCH"
                 ;;
               add|upgrade)
                 printf '%s\\n' "$*" >> "$FAKE_LOG"
@@ -182,6 +191,60 @@ class ApkLockHelperTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("inherited package constraints conflict", result.stderr)
+
+    def overwrite_error(self, owner: str) -> str:
+        return (
+            "(1/2) Installing python3-ndbm (3.14.10-r2)\n"
+            "ERROR: python3-ndbm-3.14.10-r2: trying to overwrite "
+            "usr/lib/python3.14/lib-dynload/_dbm.cpython-314-x86_64-linux-musl.so "
+            f"owned by {owner}.\n"
+            "1 error; 79.7 MiB in 90 packages"
+        )
+
+    def test_inherited_resolve_classifies_overwrites_of_outdated_parent_files(self) -> None:
+        self.environment["FAKE_ADD_ERROR"] = self.overwrite_error("python3-3.14.10-r1")
+        self.environment["FAKE_SEARCH"] = "python3-3.14.10-r2"
+        self.environment["FAKE_VERSION_COMPARISON"] = "<"
+        requests = self.directory / "requested.txt"
+        requests.write_text("mediainfo\n", encoding="utf-8")
+        self.inventory.write_text("musl 1.2.6-r3\npython3 3.14.10-r1\n", encoding="utf-8")
+        self.after.write_text("", encoding="utf-8")
+
+        result = self.run_helper("resolve", str(requests), "inherited")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "inherited package constraints conflict: "
+            "python3=3.14.10-r1 is older than repository 3.14.10-r2",
+            result.stderr,
+        )
+        self.assertIn("search --no-cache -x python3", self.log.read_text(encoding="utf-8"))
+
+    def test_inherited_resolve_does_not_treat_current_or_new_file_owners_as_parent_drift(self) -> None:
+        requests = self.directory / "requested.txt"
+        requests.write_text("mediainfo\n", encoding="utf-8")
+        self.inventory.write_text("musl 1.2.6-r3\npython3 3.14.10-r1\n", encoding="utf-8")
+        self.after.write_text("", encoding="utf-8")
+        for owner, search, comparison in (
+            # The parent pin is already the newest repository build.
+            ("python3-3.14.10-r1", "python3-3.14.10-r1", "="),
+            # The repository no longer offers the owner at all.
+            ("python3-3.14.10-r1", "", "<"),
+            # The owner is installed by this resolution, not by the parent.
+            ("python3-gdbm-3.14.10-r2", "python3-gdbm-3.14.10-r3", "<"),
+            # A different version of a parent package name is not the pinned owner.
+            ("python3-3.14.10-r0", "python3-3.14.10-r2", "<"),
+        ):
+            with self.subTest(owner=owner, search=search, comparison=comparison):
+                self.environment["FAKE_ADD_ERROR"] = self.overwrite_error(owner)
+                self.environment["FAKE_SEARCH"] = search
+                self.environment["FAKE_VERSION_COMPARISON"] = comparison
+
+                result = self.run_helper("resolve", str(requests), "inherited")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("failed to resolve inherited packages", result.stderr)
+                self.assertNotIn("constraints conflict", result.stderr)
 
     def test_inherited_resolve_ignores_transport_words_in_package_names_and_versions(self) -> None:
         requests = self.directory / "requested.txt"

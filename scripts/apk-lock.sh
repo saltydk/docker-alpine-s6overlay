@@ -141,6 +141,31 @@ add_from_files() {
     apk add --no-cache "$@"
 }
 
+stale_inherited_owner() {
+    # A file collision proves a stale parent only when the colliding file belongs
+    # to a pinned parent package whose repository build is newer than the pin.
+    # Collisions between current packages are packaging bugs, not base drift.
+    error_file=$1
+    inventory_file=$2
+    while IFS='=' read -r owner_name owner_version; do
+        grep -Fq "owned by ${owner_name}-${owner_version}." "$error_file" || continue
+        available=$(apk search --no-cache -x "$owner_name" 2>/dev/null) || continue
+        for candidate in $available; do
+            candidate_version=${candidate#"${owner_name}-"}
+            [ "$candidate_version" != "$candidate" ] || continue
+            apk version --check "$candidate_version" >/dev/null 2>&1 || continue
+            comparison=$(apk version -t "$owner_version" "$candidate_version" 2>/dev/null) ||
+                continue
+            if [ "$comparison" = "<" ]; then
+                printf '%s=%s is older than repository %s\n' \
+                    "$owner_name" "$owner_version" "$candidate_version"
+                return 0
+            fi
+        done
+    done < "$inventory_file"
+    return 1
+}
+
 verify_lock() {
     lock_file=$1
     new_temporary_file
@@ -198,6 +223,10 @@ resolve() {
                     grep -Eq 'world\[[A-Za-z0-9][A-Za-z0-9+_.-]*=[A-Za-z0-9][A-Za-z0-9+_.:~-]*\]' "$resolver_error"; then
                     printf 'apk-lock: inherited package constraints conflict: %s\n' \
                         "$resolver_detail" >&2
+                elif grep -Fq 'trying to overwrite' "$resolver_error" &&
+                    stale_owner=$(stale_inherited_owner "$resolver_error" "$inherited_inventory"); then
+                    printf 'apk-lock: inherited package constraints conflict: %s: %s\n' \
+                        "$stale_owner" "$resolver_detail" >&2
                 else
                     printf 'apk-lock: failed to resolve inherited packages: %s\n' \
                         "$resolver_detail" >&2
