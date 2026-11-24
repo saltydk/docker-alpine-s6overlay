@@ -69,4 +69,4 @@ wget=1.25.0-r3
 xz=5.8.4-r0
 xz-libs=5.8.4-r0
 zlib=1.4-r0
-zstd-libs=1.6.0-r0
+zstd-libs=1.6.0-r1
